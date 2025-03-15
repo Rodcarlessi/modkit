@@ -883,7 +883,7 @@ impl GenomeRegion {
         Self::parse_bed_line(line)
             .map_err(|e| {
                 anyhow!(
-                    "failed to parse un-stranded (bed3/4) line: {line}, {e}"
+                    "failed to parse un-stranded (bed3/4/5) line: {line}, {e}"
                 )
             })
             .map(|(_, this)| this)
@@ -903,7 +903,7 @@ impl GenomeRegion {
         }
         inner(line)
             .map_err(|e| {
-                anyhow!("failed to parse stranded (bed4+) line: {line}, {e}")
+                anyhow!("failed to parse stranded (bed5+) line: {line}, {e}")
             })
             .map(|(_, this)| this)
     }
