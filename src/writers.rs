@@ -68,7 +68,7 @@ impl<T: Write + Sized> BedMethylWriter<T> {
             "count_nocall",
         ];
         let fields = fields.join("\t");
-        format!("{fields}\n")
+        format!("#{fields}\n")
     }
 
     pub fn new(
