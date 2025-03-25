@@ -187,15 +187,29 @@ pub(super) fn aggregate_counts(
     );
     // group by position because multiple mods are distributed over more than
     // one bedmethyl record
+    // TODO move this out of this function
     let grouped_by_position: FxHashMap<
         StrandedPosition<DnaBase>,
         Vec<&BedMethylLine>,
-    > = bm_lines.iter().fold(FxHashMap::default(), |mut acc, bm_line| {
-        acc.entry(bm_line.get_stranded_position(code_lookup))
-            .or_insert(Vec::new())
-            .push(*bm_line);
-        acc
-    });
+    > = bm_lines
+        .iter()
+        .fold(FxHashMap::default(), |mut acc, bm_line| {
+            let code = bm_line.raw_mod_code;
+            let e = acc
+                .entry(bm_line.get_stranded_position(code_lookup))
+                .or_insert(FxHashMap::default())
+                .insert(code, *bm_line);
+            if let Some(other) = e {
+                assert_eq!(other.valid_coverage, bm_line.valid_coverage);
+            }
+
+            acc
+        })
+        .into_iter()
+        .map(|(pos, codes_to_lines)| {
+            (pos, codes_to_lines.values().map(|x| *x).collect())
+        })
+        .collect::<_>();
     let (counts_per_code, total) = grouped_by_position.into_iter().try_fold(
         (HashMap::new(), 0),
         |(mut acc, mut total_so_far), (_pos, grouped)| {
@@ -240,7 +254,7 @@ pub(super) fn aggregate_counts(
                 let mut message = format!(
                     "invalid data, valid coverage ({valid_coverage}) is not \
                      equal to the sum of canonical and modified counts \
-                     ({check}), "
+                     ({check}), {grouped:?} ",
                 );
                 match grouped.iter().minmax_by(|a, b| a.start().cmp(&b.start()))
                 {
@@ -331,6 +345,13 @@ mod bedmethylline_tests {
             );
             assert_eq!(bm_line, expected);
         }
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn test_parse_different_motif() {
+        let line = "CP027404.1\t2\t3\ta,AVV,0\t28\t-\t2\t3\t255,0,0\t28\t0.00\t0\t28\t0\t0\t1\t0\t0";
+        let bm_line = BedMethylLine::parse(line).unwrap();
     }
 
     #[test]
