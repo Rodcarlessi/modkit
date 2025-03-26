@@ -50,8 +50,7 @@ fn parse_bedmethyl_line(l: &str) -> IResult<&str, BedMethylLine> {
     let (rest, chrom) = consume_string(l)?;
     let (rest, start) = consume_digit(rest)?;
     let (rest, stop) = consume_digit(rest)?;
-    let (rest, _) = multispace1(rest)?;
-    // let (rest, raw_mod_code) = consume_char_from_list(rest, ",")?;
+    let (rest, _tab_or_space) = multispace1(rest)?;
     let (rest, raw_mod_code) = parse_modcode(rest)?;
     let (rest, valid_coverage) = consume_digit(rest)?;
     let (rest, strand) = parse_strand(rest)?;
