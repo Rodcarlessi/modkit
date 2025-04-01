@@ -44,6 +44,12 @@ pub enum MkError {
     #[error("invalid-collapse-method")]
     InvalidCollapseMethod,
 
+    // DMR
+    #[error("missing-in-one-condition")]
+    DmrMissing,
+    #[error("invalid-bedmethyl-data")]
+    InvalidBedMethyl(String),
+
     // Misc
     #[error("invalid-record-name")]
     InvalidRecordName,
@@ -57,6 +63,8 @@ pub enum MkError {
     InvalidRegion(String),
     #[error("contig-missing")]
     ContigMissing,
+    #[error("invalid-io-read")]
+    InvalidIO,
 
     // Entropy
     #[error("zero-reads")]
@@ -69,6 +77,10 @@ pub enum MkError {
     PercentileNotEnoughDatapoints(usize),
     #[error("invalid quantile, got {}", .0)]
     PercentileInvalidQuantile(f32),
+    #[error("beta-diff-calc-error")]
+    BetaDiffCalcError,
+    #[error("llr-calc-error")]
+    LlrCalcError,
 }
 
 #[derive(thiserror::Error, Debug)]

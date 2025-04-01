@@ -4,9 +4,9 @@ use crate::dmr::bedmethyl::{aggregate_counts, BedMethylLine};
 use crate::dmr::llr_model::{AggregatedCounts, ModificationCounts};
 use crate::dmr::tabix::{ChromToSampleBMLines, MultiSampleIndex};
 use crate::dmr::util::{DmrBatch, RegionOfInterest, RoiIter};
+use crate::errs::{MkError, MkResult};
 use crate::monoid::BorrowingMoniod;
-use anyhow::{anyhow, bail};
-use indicatif::ProgressBar;
+use indicatif::{MultiProgress, ProgressBar};
 use log::{debug, error};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
@@ -22,8 +22,8 @@ fn filter_sample_records<'a>(
         .map(|per_sample| {
             per_sample
                 .iter()
-                .map(|(sample, lines)| {
-                    let overlaping_records = lines
+                .filter_map(|(sample, lines)| {
+                    let overlapping_records = lines
                         .iter()
                         .filter(|record| {
                             roi.positions.contains(
@@ -33,7 +33,11 @@ fn filter_sample_records<'a>(
                             )
                         })
                         .collect::<Vec<&BedMethylLine>>();
-                    (*sample, overlaping_records)
+                    if overlapping_records.is_empty() {
+                        None
+                    } else {
+                        Some((*sample, overlapping_records))
+                    }
                 })
                 .collect::<FxHashMap<usize, Vec<&BedMethylLine>>>()
         })
@@ -44,29 +48,28 @@ fn filter_sample_records<'a>(
 fn aggregate_counts_per_sample(
     per_sample_filtered_records: &FxHashMap<usize, Vec<&BedMethylLine>>,
     sample_index: &MultiSampleIndex,
-) -> anyhow::Result<AggregatedCounts> {
+) -> MkResult<AggregatedCounts> {
+    // per_sample_filtered_records should always have non-zero length vectors
     let combined_counts = per_sample_filtered_records
-        .into_iter()
-        .filter_map(|(sample, records)| {
-            match aggregate_counts(&records, &sample_index.code_lookup) {
-                Ok(counts) => Some(counts),
-                Err(e) => {
-                    debug!("sample {sample} failed to aggregate counts, {e}");
-                    None
-                }
-            }
-        })
-        .collect::<Vec<AggregatedCounts>>();
-    combined_counts
-        .into_iter()
-        .reduce(|a, b| a.op(&b))
-        .ok_or_else(|| anyhow!("all samples failed"))
+        .values()
+        .map(|records| aggregate_counts(&records, &sample_index.code_lookup))
+        .collect::<MkResult<Vec<AggregatedCounts>>>()?;
+    combined_counts.into_iter().reduce(|a, b| a.op(&b)).ok_or_else(|| {
+        // shouldn't really ever happen?
+        debug!("all samples failed.. check the logs");
+        MkError::DmrMissing
+    })
 }
 
+/// Return type here is a little complicated:
+/// The outermost result is to capture failure to read/IO the bedmethyl tables.
+/// The results in the vector are due to the test of individual DMR intervals.
+/// In general, if the outermost Result is Err, the whole program should fail.
+/// It is up to the caller to decide whether to fail on the innermost Errs
 pub(super) fn get_modification_counts(
     sample_index: &MultiSampleIndex,
     dmr_batch: DmrBatch<Vec<RegionOfInterest>>,
-) -> anyhow::Result<Vec<anyhow::Result<ModificationCounts>>> {
+) -> MkResult<Vec<Result<ModificationCounts, (MkError, Option<MkError>)>>> {
     // these are the bedmethyl records associated with the entire batch.
     // however, due to how tabix works, there will likely be additional
     // bedmethyl records that aren't part of any region, so we need to do
@@ -99,7 +102,8 @@ pub(super) fn get_modification_counts(
                 if filtered_b.is_empty() {
                     message.push_str("'b' has no records")
                 }
-                bail!(message)
+                debug!("{message}");
+                Err((MkError::DmrMissing, None))
             } else {
                 let control_counts =
                     aggregate_counts_per_sample(&filtered_a, &sample_index);
@@ -112,31 +116,39 @@ pub(super) fn get_modification_counts(
                             exp_counts,
                             region_of_interest.dmr_interval,
                         )
+                        .map_err(|e| (e, None))
                     }
                     (Err(e), Err(f)) => {
-                        bail!(
-                            "failed to aggregate control counts, {} and \
+                        debug!(
+                            "{}: failed to aggregate control counts, {} and \
                              experimental counts, {}",
+                            region_of_interest.dmr_interval,
                             e.to_string(),
                             f.to_string()
-                        )
+                        );
+                        Err((e, Some(f)))
                     }
                     (Err(e), _) => {
-                        bail!(
-                            "failed to aggregate control counts, {}",
+                        debug!(
+                            "{}: failed to aggregate control counts, {}",
+                            region_of_interest.dmr_interval,
                             e.to_string()
-                        )
+                        );
+                        Err((e, None))
                     }
                     (_, Err(e)) => {
-                        bail!(
-                            "failed to aggregate experiment counts, {}",
+                        debug!(
+                            "{}: failed to aggregate experiment counts, {}",
+                            region_of_interest.dmr_interval,
                             e.to_string()
-                        )
+                        );
+                        Err((e, None))
                     }
                 }
             }
         })
-        .collect::<Vec<Result<ModificationCounts, _>>>();
+        .collect::<Vec<Result<ModificationCounts, (MkError, Option<MkError>)>>>(
+        );
 
     Ok(modification_counts_results)
 }
@@ -151,7 +163,9 @@ pub(super) fn run_pairwise_dmr(
     a_name: &str,
     b_name: &str,
     failure_counter: ProgressBar,
-) -> anyhow::Result<usize> {
+    batch_failures: ProgressBar,
+    multi_progress: MultiProgress,
+) -> anyhow::Result<(usize, FxHashMap<String, usize>)> {
     if header {
         writer.write(ModificationCounts::header(a_name, b_name).as_bytes())?;
     }
@@ -159,10 +173,11 @@ pub(super) fn run_pairwise_dmr(
     let (snd, rcv) = crossbeam_channel::bounded(1000);
 
     enum BatchResult {
-        Results(Vec<anyhow::Result<ModificationCounts>>),
-        BatchError(String, anyhow::Error, usize),
+        Results(Vec<Result<ModificationCounts, (MkError, Option<MkError>)>>),
+        BatchError(String, MkError),
     }
 
+    let pb_handle = multi_progress.clone();
     pool.spawn(move || {
         for batch in dmr_interval_iter {
             let batch_size = batch.dmr_chunks.len();
@@ -184,17 +199,28 @@ pub(super) fn run_pairwise_dmr(
                     match snd.send(results) {
                         Ok(_) => {}
                         Err(e) => {
-                            error!("failed to send results, {}", e.to_string())
+                            pb_handle.suspend(|| {
+                                error!(
+                                    "failed to send results, {}",
+                                    e.to_string()
+                                );
+                            });
+                            break;
                         }
                     }
                 }
                 Err(e) => {
-                    let batch_error =
-                        BatchResult::BatchError(range_message, e, batch_size);
+                    let batch_error = BatchResult::BatchError(range_message, e);
                     match snd.send(batch_error) {
                         Ok(_) => {}
                         Err(e) => {
-                            error!("failed to batch error, {}", e.to_string())
+                            pb_handle.suspend(|| {
+                                error!(
+                                    "failed to send batch error, {}",
+                                    e.to_string()
+                                );
+                            });
+                            break;
                         }
                     }
                 }
@@ -203,7 +229,9 @@ pub(super) fn run_pairwise_dmr(
     });
 
     let mut success_count = 0;
-    for batch_result in rcv {
+    let mut region_error_counts = FxHashMap::<String, usize>::default();
+    let mut err: Option<MkError> = None;
+    'rcv_loop: for batch_result in rcv {
         match batch_result {
             BatchResult::Results(results) => {
                 for result in results {
@@ -213,24 +241,53 @@ pub(super) fn run_pairwise_dmr(
                             success_count += 1;
                             pb.inc(1);
                         }
-                        Err(e) => {
-                            debug!("region failed, error: {}", e.to_string());
+                        Err((e, f)) => {
+                            match (&e, f.as_ref()) {
+                                (MkError::InvalidBedMethyl(message), _)
+                                | (
+                                    _,
+                                    Some(MkError::InvalidBedMethyl(message)),
+                                ) => {
+                                    multi_progress.suspend(|| {
+                                        error!(
+                                            "encountered invalid bedMethyl \
+                                             record(s), {message}, stopping"
+                                        );
+                                    });
+                                    err = Some(e);
+                                    break 'rcv_loop;
+                                }
+                                _ => {}
+                            };
+                            region_error_counts
+                                .entry(e.to_string())
+                                .and_modify(|e| *e = e.saturating_add(1))
+                                .or_insert(1);
                             failure_counter.inc(1);
                         }
                     }
                 }
             }
-            BatchResult::BatchError(message, error, batch_size) => {
-                debug!(
-                    "failed entire dmr batch, {message}, {}",
-                    error.to_string()
-                );
-                failure_counter.inc(batch_size as u64);
+            BatchResult::BatchError(message, error) => {
+                multi_progress.suspend(|| {
+                    if let MkError::InvalidBedMethyl(m) = &error {
+                        error!("failed entire dmr batch, {message}, {m}",);
+                    } else {
+                        error!("failed entire dmr batch, {message}, {error}",);
+                    }
+                });
+                batch_failures.inc(1u64);
+                err = Some(error);
+                break 'rcv_loop;
             }
         }
     }
 
     pb.finish_and_clear();
 
-    Ok(success_count)
+    if let Some(e) = err {
+        Err(e.into())
+    } else {
+        Ok((success_count, region_error_counts))
+    }
 }

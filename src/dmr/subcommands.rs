@@ -9,6 +9,7 @@ use clap::{Args, Subcommand};
 use indicatif::{MultiProgress, ProgressIterator};
 use itertools::Itertools;
 use log::{debug, error, info};
+use prettytable::row;
 use rustc_hash::FxHashMap;
 
 use crate::dmr::bedmethyl::BedMethylLine;
@@ -20,10 +21,11 @@ use crate::errs::MkResult;
 use crate::genome_positions::GenomePositions;
 use crate::logging::init_logging;
 use crate::mod_base_code::{DnaBase, ModCodeRepr, MOD_CODE_TO_DNA_BASE};
+use crate::monoid::Moniod;
 use crate::tabix::{BedMethylTbxIndex, HtsTabixHandler};
 use crate::util::{
-    create_out_directory, get_master_progress_bar, get_subroutine_progress_bar,
-    get_ticker,
+    create_out_directory, format_errors_table, get_master_progress_bar,
+    get_subroutine_progress_bar, get_ticker,
 };
 
 #[derive(Subcommand)]
@@ -180,6 +182,16 @@ pub struct PairwiseDmr {
     #[arg(long="assign-code", action=clap::ArgAction::Append)]
     mod_code_assignments: Option<Vec<String>>,
 
+    /// Log out which sequences are in common between the samples and the
+    /// reference FASTA, useful for debugging
+    #[clap(help_heading = "Logging Options")]
+    #[arg(
+        long = "careful",
+        requires = "log_filepath",
+        hide_short_help = true,
+        default_value_t = false
+    )]
+    careful: bool,
     /// File to write logs to, it's recommended to use this option.
     #[clap(help_heading = "Logging Options")]
     #[arg(long, alias = "log")]
@@ -217,7 +229,7 @@ pub struct PairwiseDmr {
     /// warn => log (debug) regions that are missing
     /// fatal => log (error) and exit the program when a region is missing.
     #[clap(help_heading = "Logging Options")]
-    #[arg(long="missing", requires = "regions_bed", default_value_t=HandleMissing::warn)]
+    #[arg(long="missing", requires = "regions_bed", default_value_t=HandleMissing::quiet)]
     handle_missing: HandleMissing,
     /// Minimum valid coverage required to use an entry from a bedMethyl. See
     /// the help for pileup for the specification and description of valid
@@ -396,10 +408,10 @@ impl PairwiseDmr {
             & (self.control_bed_methyl.len() > 1
                 || self.exp_bed_methyl.len() > 1)
         {
-            bail!(
-                "in order to perform multiple comparisons over regions use \
-                 modkit dmr multi"
-            )
+            info!(
+                "multiple samples will be combined and DMR will be performed \
+                 over regions"
+            );
         }
 
         let a_handlers = self
@@ -423,6 +435,11 @@ impl PairwiseDmr {
             self.min_valid_coverage,
             self.io_threads,
         );
+        let total = self.control_bed_methyl.len() + self.exp_bed_methyl.len();
+        let control_idxs =
+            (0..self.control_bed_methyl.len()).collect::<Vec<usize>>();
+        let exp_idxs =
+            (self.control_bed_methyl.len()..total).collect::<Vec<usize>>();
 
         let writer: Box<dyn Write> = {
             match self.out_path.as_ref() {
@@ -448,6 +465,36 @@ impl PairwiseDmr {
             &sample_index.all_contigs(),
             &mpb,
         )?;
+        let mut tab = prettytable::Table::new();
+        tab.set_format(
+            *prettytable::format::consts::FORMAT_NO_LINESEP_WITH_TITLE,
+        );
+        tab.set_titles(row!["contig", "a_contains", "b_contains", "both"]);
+        let mut common_contigs = 0usize;
+        for (name, _) in genome_positions.contig_sizes() {
+            let a_contains =
+                control_idxs.iter().any(|i| sample_index.has_contig(*i, name));
+            let b_contains =
+                exp_idxs.iter().any(|i| sample_index.has_contig(*i, name));
+            tab.add_row(row![
+                name,
+                a_contains,
+                b_contains,
+                a_contains && b_contains
+            ]);
+            if a_contains && b_contains {
+                common_contigs += 1;
+            }
+        }
+        if self.careful || common_contigs == 0 {
+            debug!("contig breakdown:\n{tab}");
+        }
+        mpb.suspend(|| {
+            info!(
+                "{common_contigs} common sequence(s) between FASTA and both \
+                 samples"
+            );
+        });
 
         let batch_size =
             self.batch_size.as_ref().map(|x| *x).unwrap_or_else(|| {
@@ -475,10 +522,10 @@ impl PairwiseDmr {
                 self.n_sample_records,
                 self.header,
                 self.segmentation_fp.as_ref(),
-                &mpb,
+                mpb.clone(),
+                &pool,
             )?
             .run(
-                mpb,
                 pool,
                 self.max_gap_size,
                 self.dmr_prior,
@@ -510,13 +557,15 @@ impl PairwiseDmr {
         info!("loading {batch_size} regions at a time");
 
         let pb = mpb.add(get_master_progress_bar(regions_of_interest.len()));
-        pb.set_message(format!("regions processed"));
+        pb.set_message("regions processed");
         let failures = mpb.add(get_ticker());
-        failures.set_message(format!("regions failed to process"));
+        failures.set_message("regions failed to process");
+        let batch_failures = mpb.add(get_ticker());
+        batch_failures.set_message("failed batches");
 
         let dmr_interval_iter = RoiIter::new(
-            &[0],
-            &[1],
+            control_idxs.as_slice(),
+            exp_idxs.as_slice(),
             "a",
             "b",
             sample_index.clone(),
@@ -524,9 +573,10 @@ impl PairwiseDmr {
             batch_size,
             self.handle_missing,
             genome_positions.clone(),
+            &mpb,
         )?;
 
-        let success_count = run_pairwise_dmr(
+        let (success_count, region_errors) = run_pairwise_dmr(
             dmr_interval_iter,
             sample_index.clone(),
             pool,
@@ -536,13 +586,21 @@ impl PairwiseDmr {
             "a",
             "b",
             failures.clone(),
+            batch_failures.clone(),
+            mpb.clone(),
         )?;
 
-        info!(
-            "{} regions processed successfully and {} regions failed",
-            success_count,
-            failures.position()
-        );
+        mpb.suspend(|| {
+            info!(
+                "{} regions processed successfully and {} regions failed",
+                success_count,
+                failures.position()
+            );
+            if !region_errors.is_empty() {
+                let tab = format_errors_table(&region_errors);
+                error!("region errors:\n{tab}");
+            }
+        });
 
         Ok(())
     }
@@ -629,12 +687,12 @@ pub struct MultiSampleDmr {
     /// warn => log (debug) regions that are missing
     /// fatal => log (error) and exit the program when a region is missing.
     #[clap(help_heading = "Logging Options")]
-    #[arg(long="missing", requires = "regions_bed", default_value_t=HandleMissing::warn)]
+    #[arg(long="missing", requires = "regions_bed", default_value_t=HandleMissing::quiet)]
     handle_missing: HandleMissing,
     /// Minimum valid coverage required to use an entry from a bedMethyl. See
     /// the help for pileup for the specification and description of valid
     /// coverage.
-    #[clap(help_heading = "Sampe Options")]
+    #[clap(help_heading = "Sample Options")]
     #[arg(long, alias = "min-coverage", default_value_t = 0)]
     min_valid_coverage: u64,
 }
@@ -775,12 +833,15 @@ impl MultiSampleDmr {
             pb.set_message("regions processed");
             let failures = mpb.add(get_ticker());
             failures.set_message("regions failed to process");
+            let batch_failures = mpb.add(get_ticker());
+            batch_failures.set_message("failed batches");
 
             let pool = rayon::ThreadPoolBuilder::new()
                 .num_threads(self.threads)
                 .build()?;
 
             debug!("running {a_name} as control and {b_name} as experiment");
+            let mut all_region_errors = FxHashMap::default();
             match RoiIter::new(
                 a_idxs,
                 b_idxs,
@@ -791,10 +852,11 @@ impl MultiSampleDmr {
                 chunk_size,
                 self.handle_missing,
                 genome_positions.clone(),
+                &mpb,
             ) {
                 Ok(dmr_interval_iter) => {
                     let writer = self.get_writer(a_name, b_name)?;
-                    let success_count = run_pairwise_dmr(
+                    let (success_count, region_errors) = run_pairwise_dmr(
                         dmr_interval_iter,
                         sample_index.clone(),
                         pool,
@@ -804,23 +866,34 @@ impl MultiSampleDmr {
                         a_name,
                         b_name,
                         failures.clone(),
+                        batch_failures.clone(),
+                        mpb.clone(),
                     )?;
-                    debug!(
-                        "{} regions processed successfully and {} regions \
-                         failed for pair {} {}",
-                        success_count,
-                        failures.position(),
-                        &a_name,
-                        &b_name,
-                    );
+                    mpb.suspend(|| {
+                        info!(
+                            "{} regions processed successfully and {} regions \
+                             failed for pair {} {}",
+                            success_count,
+                            failures.position(),
+                            &a_name,
+                            &b_name,
+                        );
+                        if !region_errors.is_empty() {
+                            let tab = format_errors_table(&region_errors);
+                            error!("region errors:\n{tab}");
+                            all_region_errors.op_mut(region_errors);
+                        }
+                    });
                 }
                 Err(e) => {
-                    error!(
-                        "pair {} {} failed to process, {}",
-                        &a_name,
-                        &b_name,
-                        e.to_string()
-                    );
+                    mpb.suspend(|| {
+                        error!(
+                            "pair {} {} failed to process, {}",
+                            &a_name,
+                            &b_name,
+                            e.to_string()
+                        );
+                    });
                     if self.handle_missing == HandleMissing::fail {
                         return Err(e);
                     }

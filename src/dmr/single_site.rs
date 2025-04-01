@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::ops::Range;
@@ -12,6 +12,7 @@ use indicatif::{MultiProgress, ProgressBar};
 use itertools::Itertools;
 use log::{debug, error, info};
 use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 
 use crate::dmr::beta_diff::{BetaParams, PMapEstimator};
 use crate::dmr::llr_model::{llk_ratio, AggregatedCounts};
@@ -19,13 +20,15 @@ use crate::dmr::tabix::{
     MultiSampleIndex, SampleToChromBMLines, SingleSiteSampleIndex,
 };
 use crate::dmr::util::DmrBatchOfPositions;
-use crate::genome_positions::GenomePositions;
+use crate::errs::{MkError, MkResult};
+use crate::genome_positions::{GenomePositions, StrandedPosition};
 use crate::hmm::{HmmModel, States};
-use crate::mod_base_code::ModCodeRepr;
+use crate::mod_base_code::{DnaBase, ModCodeRepr};
 use crate::monoid::BorrowingMoniod;
 use crate::thresholds::percentile_linear_interp;
 use crate::util::{
-    get_subroutine_progress_bar, get_ticker, Region, Strand, StrandRule,
+    format_errors_table, get_subroutine_progress_bar, get_ticker, Region,
+    Strand, StrandRule,
 };
 use crate::writers::TsvWriter;
 
@@ -37,6 +40,7 @@ pub(super) struct SingleSiteDmrAnalysis {
     interval_size: u64,
     header: bool,
     segmentation_fp: Option<PathBuf>,
+    multi_progress: MultiProgress,
 }
 
 impl SingleSiteDmrAnalysis {
@@ -54,7 +58,8 @@ impl SingleSiteDmrAnalysis {
         sample_n: usize,
         header: bool,
         segmentation_fp: Option<&PathBuf>,
-        progress: &MultiProgress,
+        progress: MultiProgress,
+        pool: &rayon::ThreadPool,
     ) -> anyhow::Result<Self> {
         let sample_index =
             SingleSiteSampleIndex::new(sample_index, num_a, num_b)
@@ -86,14 +91,16 @@ impl SingleSiteDmrAnalysis {
             );
             max_covs
         } else {
-            calculate_max_coverages(
-                sample_index.clone(),
-                genome_positions.clone(),
-                batch_size,
-                interval_size,
-                sample_n,
-                progress,
-            )?
+            pool.install(|| {
+                calculate_max_coverages(
+                    sample_index.clone(),
+                    genome_positions.clone(),
+                    batch_size,
+                    interval_size,
+                    sample_n,
+                    &progress,
+                )
+            })?
         };
         if sample_index.min_valid_coverage() > 0 {
             info!(
@@ -119,12 +126,12 @@ impl SingleSiteDmrAnalysis {
             interval_size,
             header,
             segmentation_fp: segmentation_fp.cloned(),
+            multi_progress: progress,
         })
     }
 
     pub(super) fn run(
         &self,
-        multi_progress_bar: MultiProgress,
         pool: rayon::ThreadPool,
         max_gap_size: u64,
         dmr_prior: f64,
@@ -161,16 +168,16 @@ impl SingleSiteDmrAnalysis {
                     significance_factor,
                     linear_transitions,
                     decay_distance,
-                    &multi_progress_bar,
+                    &self.multi_progress,
                 )?)
             } else {
                 Box::new(DummySegmenter::new())
             };
 
         let (scores_snd, scores_rcv) = crossbeam::channel::bounded(1000);
-        let processed_batches = multi_progress_bar.add(get_ticker());
-        let failure_counter = multi_progress_bar.add(get_ticker());
-        let success_counter = multi_progress_bar.add(get_ticker());
+        let processed_batches = self.multi_progress.add(get_ticker());
+        let failure_counter = self.multi_progress.add(get_ticker());
+        let success_counter = self.multi_progress.add(get_ticker());
 
         processed_batches.set_message("batches processed");
         failure_counter.set_message("sites failed");
@@ -185,6 +192,7 @@ impl SingleSiteDmrAnalysis {
 
         let sample_index = self.sample_index.clone();
         let pmap_estimator = self.pmap_estimator.clone();
+        let pb_handle = self.multi_progress.clone();
         pool.spawn(move || {
             for super_batch in batch_iter.filter_map(|r| match r {
                 Ok(super_batch) => Some(super_batch),
@@ -194,90 +202,162 @@ impl SingleSiteDmrAnalysis {
                 }
             }) {
                 let mut results = Vec::new();
-                let (super_batch_results, _) = rayon::join(
+                let (super_batch_results, ok) = rayon::join(
                     || {
                         super_batch
                             .into_par_iter()
-                            .filter_map(|batch_of_positions| {
-                                match process_batch_of_positions(
+                            .map(|batch_of_positions| {
+                                process_batch_of_positions(
                                     batch_of_positions,
                                     sample_index.clone(),
                                     pmap_estimator.clone(),
-                                ) {
-                                    Ok(chrom_to_scores) => {
-                                        Some(chrom_to_scores)
-                                    }
-                                    Err(e) => {
-                                        debug!("batch failed, {e}");
-                                        None
-                                    }
-                                }
+                                )
                             })
-                            .collect::<Vec<Vec<ChromToSingleScores>>>()
+                            .collect::<Vec<MkResult<Vec<ChromToSingleScores>>>>(
+                            )
                     },
                     || {
-                        results.into_iter().for_each(
-                            |chrom_to_scores: Vec<ChromToSingleScores>| {
+                        results.into_iter().try_for_each(
+                            |chrom_to_scores: MkResult<
+                                Vec<ChromToSingleScores>,
+                            >| {
                                 match scores_snd.send(chrom_to_scores) {
-                                    Ok(_) => processed_batches.inc(1),
+                                    Ok(_) => {
+                                        processed_batches.inc(1);
+                                        Ok(())
+                                    }
                                     Err(e) => {
-                                        error!(
-                                            "failed to send on channel, {e}"
-                                        );
+                                        pb_handle.suspend(|| {
+                                            error!(
+                                                "failed to send on channel, \
+                                                 {e}"
+                                            );
+                                        });
+                                        Err(())
                                     }
                                 }
                             },
                         )
                     },
                 );
+                if ok.is_err() {
+                    pb_handle.suspend(|| {
+                        error!("encountered error whilst processing, stopping");
+                    });
+                    break;
+                }
                 results = super_batch_results;
-                results.into_iter().for_each(
-                    |chrom_to_scores| match scores_snd.send(chrom_to_scores) {
-                        Ok(_) => processed_batches.inc(1),
-                        Err(e) => {
-                            error!("failed to send on channel, {e}");
+                let ok = results.into_iter().try_for_each(|chrom_to_scores| {
+                    match scores_snd.send(chrom_to_scores) {
+                        Ok(_) => {
+                            processed_batches.inc(1);
+                            Ok(())
                         }
-                    },
-                );
+                        Err(e) => {
+                            pb_handle.suspend(|| {
+                                error!("failed to send on channel, {e}");
+                            });
+                            Err(())
+                        }
+                    }
+                });
+                if ok.is_err() {
+                    pb_handle.suspend(|| {
+                        error!("encountered error whilst processing, stopping");
+                    });
+                    break;
+                }
             }
         });
 
         let mut success_count = 0usize;
-        for batch_result in scores_rcv {
-            if let Err(e) = segmenter.add(&batch_result) {
-                debug!("segmentation error, {e}");
-            }
-            for (chrom, results) in batch_result {
-                for result in results {
-                    match result {
-                        Ok(scores) => {
-                            writer.write(
-                                scores
-                                    .to_row(
-                                        multiple_samples,
-                                        matched_samples,
-                                        &chrom,
-                                    )
-                                    .as_bytes(),
-                            )?;
-                            success_counter.inc(1);
-                            success_count += 1;
+        let mut error_counts = FxHashMap::<String, usize>::default();
+        let mut err: Option<MkError> = None;
+        'rcv_loop: for batch_result in scores_rcv {
+            match batch_result {
+                Err(e) => {
+                    match &e {
+                        MkError::InvalidBedMethyl(message) => {
+                            self.multi_progress.suspend(|| {
+                                error!("batch failed: {message}, stopping");
+                            });
                         }
-                        Err(e) => {
-                            debug!("score error, {e}");
-                            failure_counter.inc(1);
+                        _ => {
+                            self.multi_progress.suspend(|| {
+                                error!("batch failed: {e}, stopping");
+                            });
                         }
-                    };
+                    }
+                    err = Some(e);
+                    break 'rcv_loop;
+                }
+                Ok(scores) => {
+                    if let Err(e) = segmenter.add(&scores) {
+                        self.multi_progress.suspend(|| {
+                            error!("segmentation error, {e}");
+                        })
+                    }
+                    for (chrom, results) in scores {
+                        for result in results {
+                            match result {
+                                Ok(scores) => {
+                                    writer.write(
+                                        scores
+                                            .to_row(
+                                                multiple_samples,
+                                                matched_samples,
+                                                &chrom,
+                                            )
+                                            .as_bytes(),
+                                    )?;
+                                    success_counter.inc(1);
+                                    success_count += 1;
+                                }
+                                Err(e) => {
+                                    error_counts
+                                        .entry(e.to_string())
+                                        .and_modify(|c| {
+                                            *c = c.saturating_add(1)
+                                        })
+                                        .or_insert(1usize);
+                                    failure_counter.inc(1);
+                                    if let MkError::InvalidBedMethyl(message) =
+                                        &e
+                                    {
+                                        self.multi_progress.suspend(|| {
+                                            error!(
+                                                "invalid record(s), \
+                                                 {message}, stopping"
+                                            );
+                                        });
+                                        err = Some(e);
+                                        break 'rcv_loop;
+                                    }
+                                }
+                            };
+                        }
+                    }
                 }
             }
         }
 
         if let Err(e) = segmenter.run_current_chunk() {
-            debug!("segmentation error, {e}")
+            self.multi_progress.suspend(|| error!("segmentation error, {e}"));
         }
         success_counter.finish_and_clear();
         failure_counter.finish_and_clear();
         segmenter.clean_up()?;
+
+        if let Some(e) = err {
+            return Err(e.into());
+        }
+
+        if !error_counts.is_empty() {
+            self.multi_progress.suspend(|| {
+                let error_table = format_errors_table(&error_counts);
+                error!("errors:\n{error_table}");
+            });
+        }
 
         info!(
             "finished, processed {} sites successfully, {} failed",
@@ -332,7 +412,10 @@ impl SingleSiteBatches {
                 done: false,
             })
         } else {
-            bail!("need at least 1 contig")
+            bail!(
+                "zero sequences in reference with records in samples, see log \
+                 for breakdown"
+            )
         }
     }
 
@@ -414,7 +497,6 @@ impl Iterator for SingleSiteBatches {
     }
 }
 
-type SingleSiteDmrScoreResult = anyhow::Result<SingleSiteDmrScore>;
 struct SingleSiteDmrScore {
     counts_a: AggregatedCounts,
     counts_b: AggregatedCounts,
@@ -481,7 +563,7 @@ impl SingleSiteDmrScore {
         position: u64,
         strand: Strand,
         estimator: &PMapEstimator,
-    ) -> anyhow::Result<Self> {
+    ) -> MkResult<Self> {
         let (replicate_epmap, replicate_effect_sizes) = if sample_index
             .matched_replicate_samples()
             && counts_a.len() == counts_b.len()
@@ -490,7 +572,10 @@ impl SingleSiteDmrScore {
             let mut replicate_epmap = Vec::with_capacity(n_samples);
             let mut replicate_effect_size = Vec::with_capacity(n_samples);
             for (a, b) in counts_a.iter().zip(counts_b) {
-                let epmap = estimator.predict(a, b)?;
+                let epmap = estimator.predict(a, b).map_err(|e| {
+                    debug!("failed to calculate MAP-based p-value, {e}");
+                    MkError::BetaDiffCalcError
+                })?;
                 replicate_epmap.push(epmap.e_pmap);
                 replicate_effect_size.push(epmap.effect_size);
             }
@@ -508,13 +593,21 @@ impl SingleSiteDmrScore {
             .floor() as usize;
         let balanced_counts_a = collapse_counts(counts_a, true);
         let balanced_counts_b = collapse_counts(counts_b, true);
-        let epmap_balanced =
-            estimator.predict(&balanced_counts_a, &balanced_counts_b)?;
+        let epmap_balanced = estimator
+            .predict(&balanced_counts_a, &balanced_counts_b)
+            .map_err(|e| {
+                debug!("failed to calculate MAP-based p-value, {e}");
+                MkError::BetaDiffCalcError
+            })?;
         let balanced_llr_score =
             llk_ratio(&balanced_counts_a, &balanced_counts_b)?;
         let collapsed_a = collapse_counts(counts_a, false);
         let collapsed_b = collapse_counts(counts_b, false);
-        let epmap = estimator.predict(&collapsed_a, &collapsed_b)?;
+        let epmap =
+            estimator.predict(&collapsed_a, &collapsed_b).map_err(|e| {
+                debug!("failed to calculate MAP-based p-value, {e}");
+                MkError::BetaDiffCalcError
+            })?;
         let llr_score = llk_ratio(&collapsed_a, &collapsed_b)?;
         Ok(Self {
             counts_a: collapsed_a,
@@ -685,43 +778,52 @@ fn collapse_counts(
     }
 }
 
-type ChromToSingleScores = (String, Vec<anyhow::Result<SingleSiteDmrScore>>);
+type ChromToSingleScores = (String, Vec<MkResult<SingleSiteDmrScore>>);
 fn process_batch_of_positions(
     batch: DmrBatchOfPositions,
     sample_index: Arc<SingleSiteSampleIndex>,
     pmap_estimator: Arc<PMapEstimator>,
-) -> anyhow::Result<Vec<ChromToSingleScores>> {
+) -> MkResult<Vec<ChromToSingleScores>> {
     let (a_lines, b_lines) =
         sample_index.read_bedmethyl_lines_organized_by_position(batch)?;
 
-    let counts = a_lines
+    let chrom_to_site_scores = a_lines
         .into_iter()
-        // intersect a_lines and b_lines on contig/chrom
+        // intersect a_lines and b_lines on contig/chrom, there should be a
+        // filter upstream of this to make sure that this is not ever a miss
         .filter_map(|(chrom, xs)| b_lines.get(&chrom).map(|ys| (chrom, xs, ys)))
         .map(|(chrom, xs, ys)| {
-            // par iter over the positions
-            let scores = xs
+            // get the union of all the positions so that we can keep track of
+            // how many are missing in one condition or the other.
+            let positions = xs
+                .keys()
+                .chain(ys.keys())
+                .unique()
+                .collect::<BTreeSet<&StrandedPosition<DnaBase>>>();
+            let scores = positions
                 .par_iter()
-                .filter_map(|(pos, a_counts)| {
-                    ys.get(&pos).map(|b_counts| (pos, a_counts, b_counts))
+                .map(|pos| {
+                    let pair_counts = xs
+                        .get(pos)
+                        .and_then(|ac| ys.get(pos).map(|bc| (ac, bc)))
+                        .ok_or(MkError::DmrMissing);
+                    pair_counts.and_then(|(a_counts, b_counts)| {
+                        SingleSiteDmrScore::new_multi(
+                            &a_counts,
+                            &b_counts,
+                            &sample_index,
+                            pos.position,
+                            pos.strand,
+                            &pmap_estimator,
+                        )
+                    })
                 })
-                .map(|(pos, a_counts, b_counts)| {
-                    // todo refactor this to be part of PMapEstimator
-                    SingleSiteDmrScore::new_multi(
-                        &a_counts,
-                        &b_counts,
-                        &sample_index,
-                        pos.position,
-                        pos.strand,
-                        &pmap_estimator,
-                    )
-                })
-                .collect::<Vec<SingleSiteDmrScoreResult>>();
+                .collect::<Vec<MkResult<SingleSiteDmrScore>>>();
             (chrom, scores)
         })
-        .collect::<Vec<_>>();
+        .collect::<Vec<ChromToSingleScores>>();
 
-    Ok(counts)
+    Ok(chrom_to_site_scores)
 }
 
 struct Coverages {
@@ -731,7 +833,7 @@ struct Coverages {
 fn get_coverage_from_batch(
     sample_index: &SingleSiteSampleIndex,
     batch: DmrBatchOfPositions,
-) -> anyhow::Result<Coverages> {
+) -> MkResult<Coverages> {
     let (a_lines, b_lines) =
         sample_index.read_bedmethyl_lines_filtered_by_position(&batch)?;
     let get_covs = |x: SampleToChromBMLines| -> Vec<u64> {
@@ -781,14 +883,30 @@ fn calculate_max_coverages(
             .filter_map(|batch_of_positions| {
                 match get_coverage_from_batch(&sample_index, batch_of_positions)
                 {
-                    Ok(coverages) => Some(coverages),
-                    Err(e) => {
-                        debug!("failed to get coverages, {e}");
-                        None
-                    }
+                    Ok(coverages) => Some(Ok(coverages)),
+                    Err(e) => match e {
+                        MkError::HtsLibError(_) => {
+                            progress.suspend(|| {
+                                error!("failed to read, {e}");
+                            });
+                            None
+                        }
+                        MkError::InvalidBedMethyl(ref message) => {
+                            progress.suspend(|| {
+                                error!("{message}");
+                            });
+                            Some(Err(e))
+                        }
+                        _ => {
+                            progress.suspend(|| {
+                                error!("{e}");
+                            });
+                            None
+                        }
+                    },
                 }
             })
-            .collect::<Vec<Coverages>>();
+            .collect::<MkResult<Vec<Coverages>>>()?;
         for mut cov in coverages.into_iter() {
             a_agg.append(&mut cov.a_coverages);
             b_agg.append(&mut cov.b_coverages);
@@ -815,7 +933,7 @@ fn calculate_max_coverages(
         .collect::<Vec<f32>>();
 
     let a_max_cov =
-        (percentile_linear_interp(&a_coverages, 0.95)?).floor() as usize;
+        percentile_linear_interp(&a_coverages, 0.95)?.floor() as usize;
     drop(a_coverages);
 
     let b_coverages = b_agg
@@ -906,7 +1024,7 @@ impl DmrSegmenter for HmmDmrSegmenter {
                         }
                         (None, _) => {
                             // nothing to do
-                            debug!("no valid results..");
+                            // debug!("no valid results..");
                         }
                     }
                 } else {
@@ -962,11 +1080,6 @@ impl DmrSegmenter for HmmDmrSegmenter {
             &self.curr_region_positions,
         );
         let took = start_time.elapsed();
-        debug!(
-            "segmenting {} ({} scores), took {took:?}",
-            region.to_string(),
-            self.curr_region_scores.len()
-        );
         let integrated_path =
             path_to_region_labels(&path, &self.curr_region_positions);
         for (start, end, state) in integrated_path.iter() {
@@ -1001,7 +1114,12 @@ impl DmrSegmenter for HmmDmrSegmenter {
             );
             self.writer.write(row.as_bytes())?;
         }
-        debug!("wrote {} segment(s)", integrated_path.len());
+        debug!(
+            "segmenting {} ({} scores), took {took:?}, wrote {} segment(s)",
+            region.to_string(),
+            self.curr_region_scores.len(),
+            integrated_path.len()
+        );
 
         // reset everything
         self.curr_region_positions = Vec::new();
@@ -1068,7 +1186,7 @@ impl HmmDmrSegmenter {
         })
     }
 
-    fn append_scores(&mut self, scores: &[anyhow::Result<SingleSiteDmrScore>]) {
+    fn append_scores(&mut self, scores: &[MkResult<SingleSiteDmrScore>]) {
         let mut rightmost = 0u64;
         for score in scores.iter().filter_map(|r| r.as_ref().ok()) {
             self.curr_region_scores.push(score.score);
