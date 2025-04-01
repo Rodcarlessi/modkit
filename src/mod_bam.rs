@@ -878,7 +878,7 @@ pub struct MmTagInfo {
     delta_list: Vec<u32>,
 }
 
-fn parse_int_list<'a>(input: &'a str) -> IResult<&str, Vec<u32>> {
+fn parse_int_list<'a>(input: &'a str) -> IResult<&'a str, Vec<u32>> {
     separated_list1(tag(","), |input: &'a str| {
         let (input, _) = multispace0(input)?;
         let (input, num) = digit1(input)?;
