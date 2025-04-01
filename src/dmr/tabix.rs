@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashSet};
+use std::fmt::Debug;
 use std::ops::Range;
 
 use anyhow::bail;
@@ -8,6 +9,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::dmr::bedmethyl::{aggregate_counts2, BedMethylLine};
 use crate::dmr::llr_model::AggregatedCounts;
 use crate::dmr::util::{n_choose_2, DmrBatch, DmrBatchOfPositions};
+use crate::errs::MkResult;
 use crate::genome_positions::StrandedPosition;
 use crate::mod_base_code::{DnaBase, ModCodeRepr};
 use crate::monoid::Moniod;
@@ -25,7 +27,7 @@ pub(super) type ChromToPosAggregatedCounts = FxHashMap<
     BTreeMap<StrandedPosition<DnaBase>, Vec<AggregatedCounts>>,
 >;
 /// Usually (control, experiment)
-pub(super) type BedMethylLinesResult<T> = anyhow::Result<(T, T)>;
+pub(super) type BedMethylLinesResult<T> = MkResult<(T, T)>;
 
 pub(super) struct MultiSampleIndex {
     index_handlers: Vec<BedMethylTbxIndex>,
@@ -54,23 +56,23 @@ impl MultiSampleIndex {
         &self,
         idxs: &FxHashSet<usize>,
         chunks: &FxHashMap<String, Range<u64>>,
-    ) -> anyhow::Result<SampleToChromBMLines> {
+    ) -> MkResult<SampleToChromBMLines> {
         // take all the mappings of sample_id to chunks
-        let groups = idxs
-            .par_iter() // yah
-            .filter_map(|id| {
-                // get the index handler for each
-                // shouldn't ever really get a miss here, but
-                // just in case do a filter_map
-                self.index_handlers
-                    .get(*id)
-                    .map(|handler| (*id, handler, chunks))
-            })
-            // chunks is a mapping of each chrom to the range in that chrom
-            // to fetch
-            .map(|(sample_id, handler, chunks)| {
-                // actually read the bedmethyl here
-                let grouped_by_chrom =
+        let groups =
+            idxs.par_iter() // yah
+                .filter_map(|id| {
+                    // get the index handler for each
+                    // shouldn't ever really get a miss here, but
+                    // just in case do a filter_map
+                    self.index_handlers
+                        .get(*id)
+                        .map(|handler| (*id, handler, chunks))
+                })
+                // chunks is a mapping of each chrom to the range in that chrom
+                // to fetch
+                .map(|(sample_id, handler, chunks)| {
+                    // actually read the bedmethyl here
+                    let grouped_by_chrom =
                         chunks
                             .par_iter()
                             // here we read the bedmethyl and have a mapping of
@@ -86,21 +88,19 @@ impl MultiSampleIndex {
                                     );
                                 bm_lines.map(|lines| (chrom.to_owned(), lines))
                             })
-                            .collect::<anyhow::Result<
+                            .collect::<MkResult<
                                 FxHashMap<String, Vec<BedMethylLine>>,
                             >>();
-                grouped_by_chrom.map(|grouped| (sample_id, grouped))
-            })
-            .collect::<anyhow::Result<
-                FxHashMap<usize, FxHashMap<String, Vec<BedMethylLine>>>,
-            >>()?;
+                    grouped_by_chrom.map(|grouped| (sample_id, grouped))
+                })
+                .collect::<MkResult<
+                    FxHashMap<usize, FxHashMap<String, Vec<BedMethylLine>>>,
+                >>()?;
 
         Ok(groups)
     }
 
-    // remember: this method _only_ reads the lines, it does not perform any
-    // filtering
-    fn read_bedmethyl_lines<T: Default>(
+    fn read_bedmethyl_lines<T: Default + Debug>(
         &self,
         dmr_batch: &DmrBatch<T>,
     ) -> BedMethylLinesResult<SampleToChromBMLines> {
@@ -112,7 +112,7 @@ impl MultiSampleIndex {
         Ok((bedmethyl_lines_a, bedmethyl_lines_b))
     }
 
-    pub(super) fn read_bedmethyl_group_by_chrom<T: Default>(
+    pub(super) fn read_bedmethyl_group_by_chrom<T: Default + Debug>(
         &self,
         dmr_batch: &DmrBatch<T>,
     ) -> BedMethylLinesResult<ChromToSampleBMLines> {
@@ -204,7 +204,7 @@ impl SingleSiteSampleIndex {
     fn organize_bedmethy_lines(
         sample: SampleToChromBMLines,
         code_lookup: &FxHashMap<ModCodeRepr, DnaBase>,
-    ) -> anyhow::Result<ChromToPosAggregatedCounts> {
+    ) -> MkResult<ChromToPosAggregatedCounts> {
         let mut agg = FxHashMap::default();
 
         // samples should be length ~1-5
@@ -232,7 +232,7 @@ impl SingleSiteSampleIndex {
                         })
                         .collect::<FxHashMap<
                             StrandedPosition<DnaBase>,
-                            anyhow::Result<AggregatedCounts>,
+                            MkResult<AggregatedCounts>,
                         >>();
                     (chrom, grouped_by_position)
                 })
@@ -240,7 +240,7 @@ impl SingleSiteSampleIndex {
                     String,
                     FxHashMap<
                         StrandedPosition<DnaBase>,
-                        anyhow::Result<AggregatedCounts>,
+                        MkResult<AggregatedCounts>,
                     >,
                 )>>();
             // There should be only a few chroms
@@ -254,9 +254,7 @@ impl SingleSiteSampleIndex {
                             .entry(position)
                             .or_insert(Vec::new())
                             .push(aggregated_counts),
-                        Err(e) => {
-                            bail!("failed to aggregate counts, {e}")
-                        }
+                        Err(e) => return Err(e),
                     }
                 }
             }
@@ -306,6 +304,7 @@ impl SingleSiteSampleIndex {
         let (bedmethyl_lines_a, bedmethyl_lines_b) =
             self.multi_sample_index.read_bedmethyl_lines(&dmr_batch)?;
 
+        // filter down to just the sites we are scoring
         let filt_lines_a = Self::intersect_bedmethyl_lines_with_sites(
             &dmr_batch,
             bedmethyl_lines_a,
@@ -324,9 +323,11 @@ impl SingleSiteSampleIndex {
         &self,
         dmr_batch: DmrBatchOfPositions,
     ) -> BedMethylLinesResult<ChromToPosAggregatedCounts> {
+        // read the records for the two samples
         let (bedmethyl_lines_a, bedmethyl_lines_b) =
             self.read_bedmethyl_lines_filtered_by_position(&dmr_batch)?;
 
+        // group by chrom, this can fail if the records are deemed invalid
         let counts_a = Self::organize_bedmethy_lines(
             bedmethyl_lines_a,
             &self.multi_sample_index.code_lookup,

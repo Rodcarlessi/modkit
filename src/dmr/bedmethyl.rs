@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 
-use anyhow::{anyhow, bail, Context};
+use anyhow::Context;
 use derive_new::new;
 use itertools::{Itertools, MinMaxResult};
+use log_once::debug_once;
 use nom::character::complete::{multispace1, none_of};
 use nom::combinator::map_res;
 use nom::multi::many1;
@@ -11,6 +12,7 @@ use nom::IResult;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::dmr::llr_model::AggregatedCounts;
+use crate::errs::{MkError, MkResult};
 use crate::genome_positions::StrandedPosition;
 use crate::mod_base_code::{DnaBase, ModCodeRepr};
 use crate::parsing_utils::{
@@ -86,9 +88,12 @@ fn parse_bedmethyl_line(l: &str) -> IResult<&str, BedMethylLine> {
 }
 
 impl BedMethylLine {
-    pub fn parse(line: &str) -> anyhow::Result<Self> {
+    pub fn parse(line: &str) -> MkResult<Self> {
         parse_bedmethyl_line(line).map(|(_, this)| this).map_err(|e| {
-            anyhow!("failed to parse bedmethyl line {line}, {}", e.to_string())
+            MkError::InvalidBedMethyl(format!(
+                "invalid bedmethyl record:\n{line}\nerror: {}",
+                e.to_string()
+            ))
         })
     }
 
@@ -164,7 +169,7 @@ impl Display for BedMethylLine {
 pub(super) fn aggregate_counts2(
     bm_lines: &[BedMethylLine],
     code_lookup: &FxHashMap<ModCodeRepr, DnaBase>,
-) -> anyhow::Result<AggregatedCounts> {
+) -> MkResult<AggregatedCounts> {
     let lines = bm_lines.iter().collect::<Vec<&BedMethylLine>>();
     aggregate_counts(&lines, code_lookup)
 }
@@ -172,7 +177,7 @@ pub(super) fn aggregate_counts2(
 pub(super) fn aggregate_counts(
     bm_lines: &[&BedMethylLine],
     code_lookup: &FxHashMap<ModCodeRepr, DnaBase>,
-) -> anyhow::Result<AggregatedCounts> {
+) -> MkResult<AggregatedCounts> {
     if bm_lines.is_empty() {
         return Ok(AggregatedCounts::default());
     }
@@ -204,10 +209,10 @@ pub(super) fn aggregate_counts(
                 .collect::<FxHashSet<u64>>();
             let valid_coverage = grouped[0].valid_coverage as usize;
             if valid_covs.len() != 1 || canonical_counts.len() != 1 {
-                let mut message = format!(
-                    "invalid data found, should not have more than 1 score or \
-                     number of canonical calls per position for a base. "
-                );
+                let mut message = "invalid data, should not have more than 1 \
+                                   score or number of canonical calls per \
+                                   position for a base. "
+                    .to_string();
                 match grouped.iter().minmax_by(|a, b| a.start().cmp(&b.start()))
                 {
                     MinMaxResult::NoElements => {}
@@ -220,7 +225,7 @@ pub(super) fn aggregate_counts(
                         message.push_str(&format!("starting at {}", s.start()))
                     }
                 }
-                bail!(message)
+                return Err(MkError::InvalidBedMethyl(message));
             }
 
             // check that the sum of canonical counts and
@@ -252,7 +257,8 @@ pub(super) fn aggregate_counts(
                         s.start()
                     )),
                 }
-                bail!(message)
+                debug_once!("{message}");
+                return Err(MkError::InvalidBedMethyl(message));
             }
             total_so_far += valid_coverage;
             Ok((acc, total_so_far))

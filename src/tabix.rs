@@ -2,18 +2,19 @@ use std::marker::PhantomData;
 use std::ops::Range;
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Context};
+use anyhow::Context;
 use itertools::Itertools;
 use log_once::debug_once;
 use rust_htslib::tbx::{Read, Reader as TbxReader};
 use rustc_hash::FxHashMap;
 
 use crate::dmr::bedmethyl::BedMethylLine;
+use crate::errs::{MkError, MkResult};
 use crate::mod_base_code::{DnaBase, ModCodeRepr};
 use crate::util::StrandRule;
 
 pub(crate) trait ParseBedLine {
-    fn parse(l: &str) -> anyhow::Result<Self>
+    fn parse(l: &str) -> MkResult<Self>
     where
         Self: Sized;
     fn overlaps(&self, strand_rule: StrandRule) -> bool;
@@ -22,7 +23,7 @@ pub(crate) trait ParseBedLine {
 }
 
 impl ParseBedLine for BedMethylLine {
-    fn parse(l: &str) -> anyhow::Result<Self> {
+    fn parse(l: &str) -> MkResult<Self> {
         BedMethylLine::parse(l)
     }
 
@@ -104,14 +105,16 @@ impl<T: ParseBedLine> HtsTabixHandler<T> {
         &self,
         reader: &'a mut TbxReader,
         strand_rule: StrandRule,
-    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<T>> + 'a> {
+    ) -> MkResult<impl Iterator<Item = MkResult<T>> + 'a> {
         Ok(reader
             .records()
             .map(|r| {
-                r.map_err(|e| anyhow!("tbx failed to read, {e}"))
+                r.map_err(|e| MkError::HtsLibError(e))
                     .and_then(|bs| {
                         String::from_utf8(bs).map_err(|e| {
-                            anyhow!("failed to convert record to UTF8, {e}")
+                            MkError::InvalidBedMethyl(format!(
+                                "record not valid Utf8, {e}"
+                            ))
                         })
                     })
                     .and_then(|s| T::parse(&s))
@@ -124,13 +127,11 @@ impl<T: ParseBedLine> HtsTabixHandler<T> {
         chrom: &str,
         range: &Range<u64>,
         threads: usize,
-    ) -> anyhow::Result<Option<TbxReader>> {
+    ) -> MkResult<Option<TbxReader>> {
         if let Some(&tid) = self.contigs.get(chrom) {
             let mut reader = TbxReader::from_path(&self.indexed_fp)?;
             reader.set_threads(threads)?;
-            reader.fetch(tid, range.start, range.end).with_context(|| {
-                format!("failed to fetch {chrom}:{}-{}", range.start, range.end)
-            })?;
+            reader.fetch(tid, range.start, range.end)?;
             Ok(Some(reader))
         } else {
             debug_once!("{:?} does not contain {chrom}", self.indexed_fp);
@@ -144,7 +145,7 @@ impl<T: ParseBedLine> HtsTabixHandler<T> {
         range: &Range<u64>,
         strand_rule: StrandRule,
         io_threads: usize,
-    ) -> anyhow::Result<Vec<T>> {
+    ) -> MkResult<Vec<T>> {
         if let Some(mut reader) = self.get_reader(chrom, range, io_threads)? {
             let it = self.fetch_region_it(&mut reader, strand_rule)?;
             it.collect()
@@ -167,9 +168,12 @@ impl HtsTabixHandler<BedMethylLine> {
         min_coverage: u64,
         code_lookup: &FxHashMap<ModCodeRepr, DnaBase>,
         io_threads: usize,
-    ) -> anyhow::Result<Vec<BedMethylLine>> {
+    ) -> MkResult<Vec<BedMethylLine>> {
+        // fail when we can't get the reader, but None means we're missing this
+        // chrom - which is OK
         if let Some(mut reader) = self.get_reader(chrom, range, io_threads)? {
             let it = self.fetch_region_it(&mut reader, StrandRule::Both)?;
+            // do the filtering here.
             it.filter_ok(|bml| bml.valid_coverage >= min_coverage)
                 .filter_ok(|bml| {
                     if code_lookup.contains_key(&bml.raw_mod_code) {
@@ -184,6 +188,8 @@ impl HtsTabixHandler<BedMethylLine> {
                 })
                 .collect()
         } else {
+            // If the reader doesn't have any records for the range an empty vec
+            // is returned.
             Ok(Vec::new())
         }
     }
@@ -193,7 +199,7 @@ impl HtsTabixHandler<BedMethylLine> {
         chrom: &str,
         range: &Range<u64>,
         threads: usize,
-    ) -> anyhow::Result<Vec<anyhow::Result<BedMethylLine>>> {
+    ) -> anyhow::Result<Vec<MkResult<BedMethylLine>>> {
         if let Some(mut reader) = self.get_reader(chrom, range, threads)? {
             let it = self.fetch_region_it(&mut reader, StrandRule::Both)?;
             Ok(it.collect())

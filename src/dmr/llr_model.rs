@@ -3,9 +3,11 @@ use std::fmt::{Display, Formatter};
 
 use anyhow::{anyhow, bail};
 use itertools::Itertools;
+use log::debug;
 use rv::prelude::*;
 
 use crate::dmr::util::DmrInterval;
+use crate::errs::{MkError, MkResult};
 use crate::mod_base_code::ModCodeRepr;
 use crate::monoid::BorrowingMoniod;
 
@@ -19,15 +21,17 @@ impl AggregatedCounts {
     pub(super) fn try_new(
         mod_code_counts: HashMap<ModCodeRepr, usize>,
         total: usize,
-    ) -> anyhow::Result<Self> {
+    ) -> MkResult<Self> {
         let total_modification_counts = mod_code_counts.values().sum::<usize>();
         if total_modification_counts > total {
-            bail!(
+            let message = format!(
                 "total modification counts ({total_modification_counts}) \
                  cannot be greater than total counts ({total})"
-            )
+            );
+            Err(MkError::InvalidBedMethyl(message))
+        } else {
+            Ok(Self { mod_code_counts, total })
         }
-        Ok(Self { mod_code_counts, total })
     }
 
     fn get_canonical_counts(&self) -> usize {
@@ -145,6 +149,7 @@ impl Display for AggregatedCounts {
 }
 
 #[derive(Debug)]
+/// Counts of modifications for each condition, scored
 pub(super) struct ModificationCounts {
     control_counts: AggregatedCounts,
     exp_counts: AggregatedCounts,
@@ -179,7 +184,7 @@ impl ModificationCounts {
         control_counts: AggregatedCounts,
         exp_counts: AggregatedCounts,
         interval: DmrInterval,
-    ) -> anyhow::Result<Self> {
+    ) -> MkResult<Self> {
         let score = llk_ratio(&control_counts, &exp_counts)?;
         Ok(Self { control_counts, exp_counts, interval, score })
     }
@@ -314,7 +319,7 @@ fn llk_beta(
 pub(super) fn llk_ratio(
     control_counts: &AggregatedCounts,
     exp_counts: &AggregatedCounts,
-) -> anyhow::Result<f64> {
+) -> MkResult<f64> {
     let n_categories = std::cmp::max(
         control_counts.mod_code_counts.keys().len(),
         exp_counts.mod_code_counts.keys().len(),
@@ -322,11 +327,15 @@ pub(super) fn llk_ratio(
     if n_categories < 2 {
         return Ok(0f64);
     }
-    if n_categories == 2 {
+    let res = if n_categories == 2 {
         llk_beta(control_counts, exp_counts)
     } else {
         llk_dirichlet(control_counts, exp_counts)
-    }
+    };
+    res.map_err(|e| {
+        debug!("failed to calculate LLR score, {e}");
+        MkError::LlrCalcError
+    })
 }
 
 #[cfg(test)]

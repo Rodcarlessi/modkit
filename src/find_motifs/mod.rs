@@ -21,6 +21,7 @@ use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::dmr::bedmethyl::BedMethylLine;
+use crate::errs::MkError;
 use crate::find_motifs::args::KnownMotifsArgs;
 use crate::find_motifs::iupac::nt_bytes::BASES;
 use crate::find_motifs::iupac::IupacBase;
@@ -1190,7 +1191,7 @@ fn load_bedmethyl(
                 .lines()
                 .par_bridge()
                 .map(|r| {
-                    r.map_err(|e| anyhow::Error::new(e))
+                    r.map_err(|_| MkError::InvalidIO)
                         .and_then(|s| BedMethylLine::parse(&s))
                 })
                 .for_each(|r| match snd.send(r) {

@@ -9,8 +9,9 @@ use std::sync::Arc;
 use anyhow::bail;
 use clap::ValueEnum;
 use derive_new::new;
-use log::{debug, error};
-use log_once::debug_once;
+use indicatif::MultiProgress;
+use log::{debug, error, info, warn};
+use log_once::warn_once;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::dmr::tabix::MultiSampleIndex;
@@ -187,12 +188,16 @@ impl RoiIter {
         chunk_size: usize,
         handle_missing: HandleMissing,
         genome_positions: Arc<GenomePositions>,
+        multi_progress: &MultiProgress,
     ) -> anyhow::Result<Self> {
         // there is a lot of lines below, but, this is really just a bunch of
         // input checking, depending on the "handle_missing" enum,
         // we might warn, fail, or do nothing
-        let regions_of_interest =
-            rois.into_iter().try_fold(Vec::new(), |mut acc, roi| {
+        multi_progress
+            .suspend(|| info!("checking for regions contained in samples"));
+        let (regions_of_interest, n_missing) = rois.into_iter().try_fold(
+            (Vec::new(), 0usize),
+            |(mut acc, n_missing), roi| {
                 let a_found = sample_a_idxs
                     .iter()
                     .any(|i| sample_index.has_contig(*i, &roi.chrom));
@@ -202,7 +207,7 @@ impl RoiIter {
                 if a_found && b_found {
                     // happy path
                     acc.push(roi);
-                    Ok(acc)
+                    Ok((acc, n_missing))
                 } else {
                     // missing from one or the other..
                     let which = if b_found {
@@ -211,14 +216,16 @@ impl RoiIter {
                         format!("'{sample_name_a}' and '{sample_name_b}'")
                     };
                     match handle_missing {
-                        HandleMissing::quiet => Ok(acc),
+                        HandleMissing::quiet => Ok((acc, n_missing + 1)),
                         HandleMissing::warn => {
-                            debug_once!(
-                                "chrom {} is missing from {which} bedMethyl \
-                                 index, discarding",
-                                &roi.chrom
-                            );
-                            Ok(acc)
+                            multi_progress.suspend(|| {
+                                warn_once!(
+                                    "chrom {} is missing from {which} \
+                                     bedMethyl index, discarding",
+                                    &roi.chrom
+                                );
+                            });
+                            Ok((acc, n_missing + 1))
                         }
                         HandleMissing::fail => {
                             let message = format!(
@@ -226,15 +233,27 @@ impl RoiIter {
                                  index, fatal error",
                                 &roi.chrom
                             );
-                            error!("{message}");
+                            multi_progress.suspend(|| {
+                                error!("{message}");
+                            });
                             bail!(message)
                         }
                     }
                 }
-            })?;
+            },
+        )?;
 
         if regions_of_interest.is_empty() {
             bail!("no valid regions in input")
+        }
+
+        if n_missing > 0 {
+            multi_progress.suspend(|| {
+                warn!(
+                    "{n_missing} contigs in regions were not found in either \
+                     sample index"
+                );
+            })
         }
 
         Ok(Self {
@@ -247,14 +266,17 @@ impl RoiIter {
     }
 }
 
-#[derive(Default)]
-pub(super) struct DmrBatch<T: Default> {
+#[derive(Default, Debug)]
+pub(super) struct DmrBatch<T: Default + Debug> {
     // these contain the filtering info
     pub(super) dmr_chunks: T,
-    // mapping of the sample index (order provided on the command line)
-    // to the set of chunks to use
+    // which indices to read bedMethyl records from, separated by condition (a
+    // or b).
     pub(super) idxs_a: FxHashSet<usize>,
     pub(super) idxs_b: FxHashSet<usize>,
+    // chrom-to-regions to fetch, this might seem redundant since T could have
+    // region information as well, but this is an optimization that reduces
+    // IO work by reading a larger swath of the bedMethyl
     pub(super) regions: FxHashMap<String, std::ops::Range<u64>>,
 }
 
