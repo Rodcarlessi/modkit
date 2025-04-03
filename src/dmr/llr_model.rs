@@ -6,7 +6,7 @@ use itertools::Itertools;
 use log::debug;
 use rv::prelude::*;
 
-use crate::dmr::util::DmrInterval;
+use crate::dmr::util::{cohen_h, CohenHResult, DmrInterval};
 use crate::errs::{MkError, MkResult};
 use crate::mod_base_code::ModCodeRepr;
 use crate::monoid::BorrowingMoniod;
@@ -54,7 +54,7 @@ impl AggregatedCounts {
         Self { mod_code_counts: counts, total }
     }
 
-    fn categorical_trials(
+    pub(super) fn categorical_trials(
         &self,
         mod_codes_to_index: &HashMap<ModCodeRepr, usize>,
     ) -> anyhow::Result<Vec<usize>> {
@@ -114,7 +114,7 @@ impl AggregatedCounts {
             .map(|(code, count)| (*code, *count as f32 / self.total as f32))
     }
 
-    pub(super) fn pct_modified(&self) -> f32 {
+    pub(super) fn frac_modified(&self) -> f32 {
         self.modified_counts() as f32 / self.total as f32
     }
 }
@@ -155,12 +155,13 @@ pub(super) struct ModificationCounts {
     exp_counts: AggregatedCounts,
     interval: DmrInterval,
     pub(crate) score: f64,
+    pub(super) cohen_hresult: CohenHResult,
 }
 
 impl ModificationCounts {
     pub(super) fn header(a_name: &str, b_name: &str) -> String {
         let mut s = [
-            "chrom",
+            "#chrom",
             "start",
             "end",
             "name",
@@ -174,6 +175,10 @@ impl ModificationCounts {
             &format!("{b_name}_mod_percentages"),
             &format!("{a_name}_pct_modified"),
             &format!("{b_name}_pct_modified"),
+            "effect_size",
+            "cohen_h",
+            "cohen_h_low",
+            "cohen_h_high",
         ]
         .join("\t");
         s.push('\n');
@@ -186,7 +191,14 @@ impl ModificationCounts {
         interval: DmrInterval,
     ) -> MkResult<Self> {
         let score = llk_ratio(&control_counts, &exp_counts)?;
-        Ok(Self { control_counts, exp_counts, interval, score })
+        let coh_res = cohen_h(&control_counts, &exp_counts);
+        Ok(Self {
+            control_counts,
+            exp_counts,
+            interval,
+            score,
+            cohen_hresult: coh_res,
+        })
     }
 
     pub(super) fn to_row(&self) -> anyhow::Result<String> {
@@ -195,6 +207,10 @@ impl ModificationCounts {
         let stop = self.interval.stop();
         let line = format!(
             "\
+        {}{sep}\
+        {}{sep}\
+        {}{sep}\
+        {}{sep}\
         {}{sep}\
         {}{sep}\
         {}{sep}\
@@ -222,10 +238,18 @@ impl ModificationCounts {
             self.exp_counts.total,
             self.control_counts.string_percentages(),
             self.exp_counts.string_percentages(),
-            self.control_counts.pct_modified(),
-            self.exp_counts.pct_modified(),
+            self.control_counts.frac_modified(),
+            self.exp_counts.frac_modified(),
+            self.effect_size(),
+            self.cohen_hresult.h,
+            self.cohen_hresult.h_low,
+            self.cohen_hresult.h_high,
         );
         Ok(line)
+    }
+
+    fn effect_size(&self) -> f32 {
+        self.control_counts.frac_modified() - self.exp_counts.frac_modified()
     }
 }
 

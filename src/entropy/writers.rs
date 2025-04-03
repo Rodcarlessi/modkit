@@ -140,7 +140,7 @@ pub(super) trait EntropyWriter {
 }
 
 const WINDOWS_HEADER: &'static str = "\
-        chrom\tstart\tend\tentropy\tstrand\tnum_reads\n";
+        #chrom\tstart\tend\tentropy\tstrand\tnum_reads\n";
 
 pub(super) struct WindowsWriter<T: Write> {
     output: BufWriter<T>,

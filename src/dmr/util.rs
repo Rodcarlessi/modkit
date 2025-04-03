@@ -6,6 +6,12 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::dmr::llr_model::AggregatedCounts;
+use crate::dmr::tabix::MultiSampleIndex;
+use crate::genome_positions::{GenomePositions, StrandedPosition};
+use crate::mod_base_code::DnaBase;
+use crate::position_filter::Iv;
+use crate::util::{GenomeRegion, StrandRule};
 use anyhow::bail;
 use clap::ValueEnum;
 use derive_new::new;
@@ -13,12 +19,6 @@ use indicatif::MultiProgress;
 use log::{debug, error, info, warn};
 use log_once::warn_once;
 use rustc_hash::{FxHashMap, FxHashSet};
-
-use crate::dmr::tabix::MultiSampleIndex;
-use crate::genome_positions::{GenomePositions, StrandedPosition};
-use crate::mod_base_code::DnaBase;
-use crate::position_filter::Iv;
-use crate::util::{GenomeRegion, StrandRule};
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 #[allow(non_camel_case_types)]
@@ -460,11 +460,60 @@ pub(crate) fn n_choose_2(n: usize) -> anyhow::Result<usize> {
     }
 }
 
+#[derive(Debug)]
+pub(super) struct CohenHResult {
+    pub(super) h: f64,
+    pub(super) h_low: f64,
+    pub(super) h_high: f64,
+}
+
+#[inline]
+fn sign(x: f64) -> f64 {
+    if x.is_sign_positive() {
+        1f64
+    } else {
+        -1f64
+    }
+}
+
+// translated from R code here:
+//  https://stats.stackexchange.com/questions/80082/confidence-intervals-for-cohens-h-effect-size
+// reference: https://en.wikipedia.org/wiki/Cohen%27s_h
+const Q: f64 = 1.9599639845400538f64;
+#[inline]
+fn calc_cohen_h(p1: f64, p2: f64, n1: usize, n2: usize) -> CohenHResult {
+    let x1 = (sign(p1) * p1.abs().sqrt()).asin();
+    let x2 = (sign(p2) * p2.abs().sqrt()).asin();
+    let es = x1 - x2;
+    let h = es * 2f64;
+    let es = es.abs();
+    let se = (0.25f64 * (1f64 / n1 as f64 + 1f64 / n2 as f64)).sqrt();
+    let ci_diff = Q * se;
+    CohenHResult {
+        h,
+        h_low: (es - ci_diff) * 2f64,
+        h_high: (es + ci_diff) * 2f64,
+    }
+}
+
+pub(super) fn cohen_h(
+    counts_a: &AggregatedCounts,
+    counts_b: &AggregatedCounts,
+) -> CohenHResult {
+    calc_cohen_h(
+        counts_a.frac_modified() as f64,
+        counts_b.frac_modified() as f64,
+        counts_a.total,
+        counts_b.total,
+    )
+}
+
 #[cfg(test)]
 mod dmr_util_tests {
-    use crate::dmr::util::{parse_roi_bed, DmrInterval};
+    use crate::dmr::util::{calc_cohen_h, parse_roi_bed, DmrInterval};
     use crate::position_filter::Iv;
     use crate::util::StrandRule;
+    use std::ops::Neg;
 
     #[test]
     #[rustfmt::skip]
@@ -575,5 +624,15 @@ mod dmr_util_tests {
         let fp = "tests/resources/test_motif_bed_drach.bed";
         let rois = parse_roi_bed(fp).unwrap();
         assert_eq!(rois.len(), 10);
+    }
+
+    #[test]
+    fn test_cohen_h_signed() {
+        let n = 100;
+        let res1 = calc_cohen_h(0.1, 0.5, n, n);
+        let res2 = calc_cohen_h(0.5, 0.1, n, n);
+        assert_eq!(res1.h, res2.h.neg());
+        assert_eq!(res1.h_low, res2.h_low);
+        assert_eq!(res1.h_high, res2.h_high);
     }
 }

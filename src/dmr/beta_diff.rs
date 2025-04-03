@@ -123,7 +123,7 @@ impl EstimatedPMap {
     }
 }
 
-const MAX_COV_ALLOWED: usize = 300usize;
+const MAX_COV_ALLOWED: usize = 100usize;
 pub struct PMapEstimator {
     max_coverages: [usize; 2],
     prior: BetaParams,
@@ -228,8 +228,6 @@ impl PMapEstimator {
         a_counts: Counts,
         b_counts: Counts,
     ) -> anyhow::Result<EstimatedPMap> {
-        // let a_counts: Counts = Counts::try_from(a_counts)?;
-        // let b_counts: Counts = Counts::try_from(b_counts)?;
         let a_counts = a_counts.resize(self.max_coverages[0]);
         let b_counts = b_counts.resize(self.max_coverages[1]);
         let empirical_effect_size = a_counts.empirical_effect_size(&b_counts);
@@ -248,7 +246,6 @@ impl PMapEstimator {
 
         let posterior_params_a = self.calc_posterior_params(&a_counts);
         let posterior_params_b = self.calc_posterior_params(&b_counts);
-
         let effect_prob = self.calc_beta_diff(
             adjusted_empirical_effect_size,
             &posterior_params_a,

@@ -25,6 +25,7 @@ use crate::util::{
     create_out_directory, get_guage, get_subroutine_progress_bar, get_ticker,
     read_sequence_lengths_file, ReferenceRecord, StrandRule,
 };
+use crate::writers::bedmethyl_header;
 use bigtools::{
     beddata::BedParserStreamingIterator, BigWigWrite, InputSortType,
 };
@@ -221,6 +222,9 @@ impl EntryMergeBedMethyl {
                 Box::new(writer)
             }
         };
+        if self.with_header {
+            writer.write(bedmethyl_header().as_bytes())?;
+        }
 
         let readers = self
             .in_bedmethyl

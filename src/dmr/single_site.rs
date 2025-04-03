@@ -19,7 +19,7 @@ use crate::dmr::llr_model::{llk_ratio, AggregatedCounts};
 use crate::dmr::tabix::{
     MultiSampleIndex, SampleToChromBMLines, SingleSiteSampleIndex,
 };
-use crate::dmr::util::DmrBatchOfPositions;
+use crate::dmr::util::{cohen_h, DmrBatchOfPositions};
 use crate::errs::{MkError, MkResult};
 use crate::genome_positions::{GenomePositions, StrandedPosition};
 use crate::hmm::{HmmModel, States};
@@ -169,6 +169,7 @@ impl SingleSiteDmrAnalysis {
                     linear_transitions,
                     decay_distance,
                     &self.multi_progress,
+                    self.header,
                 )?)
             } else {
                 Box::new(DummySegmenter::new())
@@ -504,6 +505,9 @@ struct SingleSiteDmrScore {
     strand: Strand,
     score: f64,
     map_pval: f64,
+    cohen_h: f64,
+    cohen_h_low: f64,
+    cohen_h_high: f64,
     effect_size: f64,
     balanced_map_pval: f64,
     balanced_effect_size: f64,
@@ -517,7 +521,7 @@ struct SingleSiteDmrScore {
 impl SingleSiteDmrScore {
     fn header(multiple_samples: bool, matched_samples: bool) -> String {
         let mut fields = vec![
-            "chrom",
+            "#chrom",
             "start",
             "end",
             "name",
@@ -546,9 +550,13 @@ impl SingleSiteDmrScore {
         }
 
         if matched_samples {
+            // todo replicate cohens h?
             for field in ["replicate_map_pvalues", "replicate_effect_sizes"] {
                 fields.push(field)
             }
+        }
+        for field in ["cohen_h", "cohen_h_low", "cohen_h_high"] {
+            fields.push(field);
         }
 
         let mut s = fields.join("\t");
@@ -609,6 +617,7 @@ impl SingleSiteDmrScore {
                 MkError::BetaDiffCalcError
             })?;
         let llr_score = llk_ratio(&collapsed_a, &collapsed_b)?;
+        let cohen_result = cohen_h(&collapsed_a, &collapsed_b);
         Ok(Self {
             counts_a: collapsed_a,
             counts_b: collapsed_b,
@@ -616,6 +625,9 @@ impl SingleSiteDmrScore {
             strand,
             score: llr_score,
             map_pval: epmap.e_pmap,
+            cohen_h: cohen_result.h,
+            cohen_h_high: cohen_result.h_high,
+            cohen_h_low: cohen_result.h_low,
             effect_size: epmap.effect_size,
             balanced_map_pval: epmap_balanced.e_pmap,
             balanced_effect_size: epmap_balanced.effect_size,
@@ -669,6 +681,9 @@ impl SingleSiteDmrScore {
             {}{sep}\
             {}{sep}\
             {}{sep}\
+            {}{sep}\
+            {}{sep}\
+            {}{sep}\
             {}\n",
                 chrom,
                 self.position,
@@ -682,8 +697,8 @@ impl SingleSiteDmrScore {
                 self.counts_b.total,
                 self.counts_a.string_percentages(),
                 self.counts_b.string_percentages(),
-                self.counts_a.pct_modified(),
-                self.counts_b.pct_modified(),
+                self.counts_a.frac_modified(),
+                self.counts_b.frac_modified(),
                 self.map_pval,
                 self.effect_size,
                 self.balanced_map_pval,
@@ -692,6 +707,9 @@ impl SingleSiteDmrScore {
                 self.pct_b_samples,
                 replicate_map_pvals,
                 replicate_effect_sizes,
+                self.cohen_h,
+                self.cohen_h_low,
+                self.cohen_h_high,
             )
         } else {
             self.to_row_pair(multiple_samples, chrom)
@@ -730,22 +748,28 @@ impl SingleSiteDmrScore {
             self.counts_b.total,
             self.counts_a.string_percentages(),
             self.counts_b.string_percentages(),
-            self.counts_a.pct_modified(),
-            self.counts_b.pct_modified(),
+            self.counts_a.frac_modified(),
+            self.counts_b.frac_modified(),
             self.map_pval,
             self.effect_size,
         );
         let rest = if multiple_samples {
             format!(
                 "\
-                {sep}{}{sep}{}{sep}{}{sep}{}\n",
+                {sep}{}{sep}{}{sep}{}{sep}{}{sep}{}{sep}{}{sep}{}\n",
                 self.balanced_map_pval,
                 self.balanced_effect_size,
                 self.pct_a_samples,
-                self.pct_b_samples
+                self.pct_b_samples,
+                self.cohen_h,
+                self.cohen_h_low,
+                self.cohen_h_high,
             )
         } else {
-            format!("\n")
+            format!(
+                "{sep}{}{sep}{}{sep}{}\n",
+                self.cohen_h, self.cohen_h_low, self.cohen_h_high,
+            )
         };
 
         format!("{row}{rest}")
@@ -1086,10 +1110,13 @@ impl DmrSegmenter for HmmDmrSegmenter {
             let counts_a = self.get_counts_a(*start, *end);
             let counts_b = self.get_counts_b(*start, *end);
             let score = llk_ratio(&counts_a, &counts_b)?;
-            let frac_mod_a = counts_a.pct_modified();
-            let frac_mod_b = counts_b.pct_modified();
+            let frac_mod_a = counts_a.frac_modified();
+            let frac_mod_b = counts_b.frac_modified();
             let effect_size = frac_mod_a - frac_mod_b;
             let num_sites = self.curr_counts_a.range(*start..*end).count();
+            let cohen_result = cohen_h(&counts_a, &counts_b);
+            let (cohen_h, cohen_h_low, cohen_h_high) =
+                (cohen_result.h, cohen_result.h_low, cohen_result.h_high);
 
             let sep = '\t';
             let row = format!(
@@ -1105,7 +1132,10 @@ impl DmrSegmenter for HmmDmrSegmenter {
                 {}{sep}\
                 {frac_mod_a}{sep}\
                 {frac_mod_b}{sep}\
-                {effect_size}\n",
+                {effect_size}{sep}\
+                {cohen_h}{sep}\
+                {cohen_h_low}{sep}\
+                {cohen_h_high}\n",
                 self.curr_chrom.as_ref().unwrap(),
                 counts_a.string_counts(),
                 counts_b.string_counts(),
@@ -1155,6 +1185,7 @@ impl HmmDmrSegmenter {
         linear_transitions: bool,
         decay_distance: u32,
         multi_progress: &MultiProgress,
+        with_header: bool,
     ) -> anyhow::Result<Self> {
         let hmm = HmmModel::new(
             dmr_prior,
@@ -1165,7 +1196,8 @@ impl HmmDmrSegmenter {
             decay_distance,
             linear_transitions,
         )?;
-        let writer = TsvWriter::new_path(out_fp, true, None)?;
+        let header = if with_header { Some(Self::header()) } else { None };
+        let writer = TsvWriter::new_path(out_fp, true, header)?;
         let size_gauge = multi_progress.add(get_ticker());
         let segments_written = multi_progress.add(get_ticker());
         size_gauge.set_message("[segmenter] current region size");
@@ -1184,6 +1216,28 @@ impl HmmDmrSegmenter {
             size_gauge,
             segments_written,
         })
+    }
+
+    fn header() -> String {
+        let cols = [
+            "#chrom",
+            "chrom_start",
+            "chrom_end",
+            "name",
+            "score",
+            "num_sites",
+            "a_counts",
+            "b_counts",
+            "a_percentages",
+            "b_percentages",
+            "a_frac_modified",
+            "b_frac_modified",
+            "effect_size",
+            "cohen_h",
+            "cohen_h_low",
+            "cohen_h_high",
+        ];
+        cols.join("\t")
     }
 
     fn append_scores(&mut self, scores: &[MkResult<SingleSiteDmrScore>]) {
