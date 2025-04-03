@@ -351,7 +351,7 @@ mod bedmethylline_tests {
     #[rustfmt::skip]
     fn test_parse_different_motif() {
         let line = "CP027404.1\t2\t3\ta,AVV,0\t28\t-\t2\t3\t255,0,0\t28\t0.00\t0\t28\t0\t0\t1\t0\t0";
-        let bm_line = BedMethylLine::parse(line).unwrap();
+        let _bm_line = BedMethylLine::parse(line).unwrap();
     }
 
     #[test]

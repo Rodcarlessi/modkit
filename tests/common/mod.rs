@@ -194,3 +194,12 @@ pub fn parse_mod_profile(
 
     Ok(agg)
 }
+
+pub fn check_legal_csv<const SEP: u8>(fp: &PathBuf) {
+    let mut reader = csv::ReaderBuilder::new()
+        .delimiter(SEP)
+        .from_reader(File::open(fp).expect("should open file"));
+    for record in reader.records() {
+        let _ = record.expect("should be valid record");
+    }
+}

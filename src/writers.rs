@@ -45,30 +45,34 @@ pub struct BedMethylWriter<T: Write> {
     tabs_and_spaces: bool,
 }
 
+pub fn bedmethyl_header() -> String {
+    let fields = [
+        "chrom",
+        "chromStart",
+        "chromEnd",
+        "name",
+        "score",
+        "strand",
+        "thickStart",
+        "thickEnd",
+        "color",
+        "valid_coverage",
+        "percent_modified",
+        "count_modified",
+        "count_canonical",
+        "count_other_mod",
+        "count_delete",
+        "count_fail",
+        "count_diff",
+        "count_nocall",
+    ];
+    let fields = fields.join("\t");
+    format!("#{fields}\n")
+}
+
 impl<T: Write + Sized> BedMethylWriter<T> {
     fn header() -> String {
-        let fields = [
-            "chrom",
-            "chromStart",
-            "chromEnd",
-            "name",
-            "score",
-            "strand",
-            "thickStart",
-            "thickEnd",
-            "color",
-            "valid_coverage",
-            "percent_modified",
-            "count_modified",
-            "count_canonical",
-            "count_other_mod",
-            "count_delete",
-            "count_fail",
-            "count_diff",
-            "count_nocall",
-        ];
-        let fields = fields.join("\t");
-        format!("#{fields}\n")
+        bedmethyl_header()
     }
 
     pub fn new(

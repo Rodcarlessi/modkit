@@ -40,7 +40,7 @@ impl MethylationStats {
     }
 
     fn header(mod_codes: &[ModCodeRepr]) -> prettytable::Row {
-        let mut row = row!["chrom", "start", "end", "name", "strand"];
+        let mut row = row!["#chrom", "start", "end", "name", "strand"];
         for code in mod_codes {
             row.add_cell(cell!(format!("count_{code}")));
             row.add_cell(cell!(format!("count_valid_{code}")));

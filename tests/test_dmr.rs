@@ -1,4 +1,6 @@
-use crate::common::{check_against_expected_text_file, run_modkit};
+use crate::common::{
+    check_against_expected_text_file, check_legal_csv, run_modkit,
+};
 
 mod common;
 
@@ -28,12 +30,14 @@ fn test_dmr_regression() {
         "tests/resources/cpg_chr20_with_orig_names_selection.bed",
         "--ref",
         "tests/resources/GRCh38_chr20.fa",
+        "--header",
         "-f",
         "--base",
         "C",
     ])
     .expect("failed to run modkit dmr");
 
+    check_legal_csv::<{ '\t' as u8 }>(&out_bed);
     check_against_expected_text_file(
         out_bed.to_str().unwrap(),
         "tests/resources/test_output_chr20-2.bed",
@@ -58,11 +62,13 @@ fn test_dmr_regression() {
         "--ref",
         "tests/resources/GRCh38_chr20.fa",
         "-f",
+        "--header",
         "--base",
         "C",
     ])
     .expect("failed to run modkit dmr");
 
+    check_legal_csv::<{ '\t' as u8 }>(&out_bed);
     check_against_expected_text_file(
         out_bed.to_str().unwrap(),
         "tests/resources/test_output_chr20-2.bed",
