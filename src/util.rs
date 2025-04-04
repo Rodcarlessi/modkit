@@ -4,13 +4,6 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::str;
 
-use crate::errs::{MkError, MkResult};
-use crate::mod_base_code::{DnaBase, ParseChar};
-use crate::monoid::Moniod;
-use crate::parsing_utils::{
-    consume_char, consume_digit, consume_dot, consume_float, consume_string,
-    consume_string_spaces,
-};
 use anyhow::{anyhow, bail};
 use anyhow::{Context, Result as AnyhowResult};
 use bio::alphabets::dna::complement;
@@ -22,6 +15,7 @@ use itertools::Itertools;
 use lazy_static::lazy_static;
 use linear_map::LinearMap;
 use log::{debug, error, info};
+use nom::bytes::complete::tag;
 use nom::character::complete::one_of;
 use nom::combinator::map_res;
 use nom::multi::many0;
@@ -33,6 +27,15 @@ use rust_htslib::bam::{
     HeaderView, Read,
 };
 use rustc_hash::FxHashMap;
+use substring::Substring;
+
+use crate::errs::{MkError, MkResult};
+use crate::mod_base_code::{DnaBase, ParseChar};
+use crate::monoid::Moniod;
+use crate::parsing_utils::{
+    consume_char, consume_digit, consume_dot, consume_float, consume_string,
+    consume_string_spaces,
+};
 
 pub(crate) const TAB: char = '\t';
 
@@ -503,22 +506,63 @@ impl Region {
         }
     }
 
-    pub fn parse_str(raw: &str, header: &HeaderView) -> MkResult<Self> {
-        if raw.contains(':') {
-            Self::parse_raw_with_start_and_end(raw)
+    fn parse_start_stop(raw: &str) -> Option<(u32, u32)> {
+        fn parse_coordinates(input: &str) -> IResult<&str, (u32, u32)> {
+            let (rest, start) = nom::character::complete::u32(input)?;
+            let (rest, _) = tag("-")(rest)?;
+            let (rest, stop) = nom::character::complete::u32(rest)?;
+            Ok((rest, (start as u32, stop as u32)))
+        }
+
+        let is_coordinates = raw
+            .chars()
+            .filter(|c| (*c != '-') && (*c != ','))
+            .all(|c| c.is_numeric());
+        let has_sep = raw.contains('-');
+        if is_coordinates && has_sep {
+            let no_commas = raw.replace(",", "");
+            parse_coordinates(&no_commas).map(|(_, (s, t))| (s, t)).ok()
         } else {
-            let target_id = (0..header.target_count()).find_map(|tid| {
-                String::from_utf8(header.tid2name(tid).to_vec()).ok().and_then(
-                    |contig| if &contig == raw { Some(tid) } else { None },
-                )
-            });
-            let target_length =
-                target_id.and_then(|tid| header.target_len(tid));
-            if let Some(len) = target_length {
-                Ok(Self { name: raw.to_owned(), start: 0, end: len as u32 })
+            None
+        }
+    }
+
+    fn get_region_subsection(
+        contig: &str,
+        start: u32,
+        stop: u32,
+        header: &HeaderView,
+    ) -> MkResult<Self> {
+        let target_id = (0..header.target_count()).find_map(|tid| {
+            String::from_utf8(header.tid2name(tid).to_vec()).ok().and_then(
+                |sq_record| if &sq_record == contig { Some(tid) } else { None },
+            )
+        });
+
+        let target_length = target_id.and_then(|tid| header.target_len(tid));
+        if let Some(len) = target_length {
+            let end = std::cmp::min(stop as u64, len) as u32;
+            Ok(Self { name: contig.to_owned(), start, end })
+        } else {
+            Err(MkError::ContigMissing(contig.to_string()))
+        }
+    }
+
+    pub fn parse_str(raw: &str, header: &HeaderView) -> MkResult<Self> {
+        let final_colon_pos = raw
+            .rfind(":")
+            // add one to remove the ":"
+            .map(|x| std::cmp::min(x.saturating_add(1), raw.len()));
+        if let Some(final_col_pos) = final_colon_pos {
+            let start_stop = raw.substring(final_col_pos, raw.len());
+            let contig = raw.substring(0, final_col_pos.saturating_sub(1));
+            if let Some((start, stop)) = Self::parse_start_stop(start_stop) {
+                Self::get_region_subsection(contig, start, stop, header)
             } else {
-                Err(MkError::ContigMissing)
+                Self::get_region_subsection(raw, 0, u32::MAX, header)
             }
+        } else {
+            Self::get_region_subsection(raw, 0, u32::MAX, header)
         }
     }
 
@@ -1015,9 +1059,10 @@ mod utils_tests {
     use rust_htslib::bam::Read;
     use similar_asserts::assert_eq;
 
+    use crate::errs::MkError;
     use crate::util::{
         get_query_name_string, get_stringable_aux, parse_partition_tags,
-        GenomeRegion, SamTag, StrandRule,
+        GenomeRegion, Region, SamTag, StrandRule,
     };
 
     use super::Kmer;
@@ -1142,5 +1187,78 @@ mod utils_tests {
         let nt = kmer.get_nt(0).unwrap();
         assert_eq!(nt, 'G' as u8);
         assert!(kmer.get_nt(6).is_none());
+    }
+
+    #[test]
+    fn test_parse_coordinates() {
+        let raw = "1-2,000";
+        let (start, stop) = Region::parse_start_stop(raw).unwrap();
+        assert_eq!(start, 1);
+        assert_eq!(stop, 2000);
+        let raw = "1,200-2,000";
+        let (start, stop) = Region::parse_start_stop(raw).unwrap();
+        assert_eq!(start, 1200);
+        assert_eq!(stop, 2000);
+        let raw = "000,1-2,000";
+        let (start, stop) = Region::parse_start_stop(raw).unwrap();
+        assert_eq!(start, 1);
+        assert_eq!(stop, 2000);
+        let raw = "1200";
+        let x = Region::parse_start_stop(raw);
+        assert!(x.is_none());
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn test_parse_transcript_region() {
+        let reader =
+            bam::Reader::from_path("tests/resources/transcriptome_header.sam")
+                .unwrap();
+        let raw = "ENST00000616016.5|ENSG00000187634.13|OTTHUMG00000040719.11|OTTHUMT00000316521.3|SAMD11-209|SAMD11|3465|UTR5:1-509|CDS:510-3044|UTR3:3045-3465|:1-3,200";
+        let region = Region::parse_str(raw, &reader.header()).unwrap();
+        assert_eq!(
+            &region.name,
+            "ENST00000616016.5|ENSG00000187634.13|OTTHUMG00000040719.11|OTTHUMT00000316521.3|SAMD11-209|SAMD11|3465|UTR5:1-509|CDS:510-3044|UTR3:3045-3465|"
+        );
+        assert_eq!(region.start, 1);
+        assert_eq!(region.end, 3200);
+        let raw = "ENST00000616016.5|ENSG00000187634.13|OTTHUMG00000040719.11|OTTHUMT00000316521.3|SAMD11-209|SAMD11|3465|UTR5:1-509|CDS:510-3044|UTR3:3045-3465|:1-99,999";
+        let region = Region::parse_str(raw, &reader.header()).unwrap();
+        assert_eq!(
+            &region.name,
+            "ENST00000616016.5|ENSG00000187634.13|OTTHUMG00000040719.11|OTTHUMT00000316521.3|SAMD11-209|SAMD11|3465|UTR5:1-509|CDS:510-3044|UTR3:3045-3465|"
+        );
+        assert_eq!(region.start, 1);
+        assert_eq!(region.end, 3465);
+        let raw = "ENST00000616016.5|ENSG00000187634.13|OTTHUMG00000040719.11|OTTHUMT00000316521.3|SAMD11-209|SAMD11|3465|UTR5:1-509|CDS:510-3044|UTR3:3045-3465|";
+        let region = Region::parse_str(raw, &reader.header()).unwrap();
+        assert_eq!(
+            &region.name,
+            "ENST00000616016.5|ENSG00000187634.13|OTTHUMG00000040719.11|OTTHUMT00000316521.3|SAMD11-209|SAMD11|3465|UTR5:1-509|CDS:510-3044|UTR3:3045-3465|"
+        );
+        assert_eq!(region.start, 0);
+        assert_eq!(region.end, 3465);
+        let raw = "tag|anothertag|decoy:100-200|:2-3,200";
+        let region = Region::parse_str(raw, &reader.header());
+        match region.unwrap_err() {
+            MkError::ContigMissing(s) => {
+                assert_eq!(s, "tag|anothertag|decoy:100-200|".to_string())
+            }
+            e @ _ => assert!(false, "incorrect error {e}"),
+        }
+        let reader = bam::Reader::from_path("tests/resources/bc_anchored_10_reads.sorted.bam").unwrap();
+        let raw = "oligo_1512_adapters:1-10";
+        let region = Region::parse_str(raw, reader.header()).unwrap();
+        assert_eq!(&region.name, "oligo_1512_adapters");
+        assert_eq!(region.start, 1);
+        assert_eq!(region.end, 10);
+        let raw = "oligo_1512_adapters:-1-10";
+        let region = Region::parse_str(raw, reader.header());
+        match region.unwrap_err() {
+            MkError::ContigMissing(s) => {
+                assert_eq!(s, "oligo_1512_adapters:-1-10".to_string())
+            }
+            e @ _ => assert!(false, "incorrect error {e}"),
+        }
     }
 }

@@ -61,8 +61,11 @@ pub enum MkError {
     EmptyReadSequence,
     #[error("invalid region, {}, should be 'chrom' or 'chrom:start-stop'", .0)]
     InvalidRegion(String),
-    #[error("contig-missing")]
-    ContigMissing,
+    // TODO should make a second type of errors that contain user-facing
+    // information  compared to ones that tabulate "missing" or incorrect
+    // data that can otherwise  be passed over.
+    #[error("contig-missing, {}", .0)]
+    ContigMissing(String),
     #[error("invalid-io-read")]
     InvalidIO,
 

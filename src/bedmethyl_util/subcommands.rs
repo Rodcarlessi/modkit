@@ -485,6 +485,9 @@ impl EntryToBigWig {
                     .map(|(ch, sz)| (ch, sz as u32))
                     .collect::<HashMap<String, u32>>()
             })?;
+        mpb.suspend(|| {
+            info!("loaded {} chromosomes", chrom_sizes.len());
+        });
 
         let mut outb = BigWigWrite::create_file(&self.out_fp, chrom_sizes)?;
         outb.options.max_zooms = self.nzooms;
