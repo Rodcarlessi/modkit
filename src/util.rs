@@ -475,37 +475,6 @@ impl Region {
         self.end - self.start
     }
 
-    fn parse_raw_with_start_and_end(raw: &str) -> MkResult<Self> {
-        let mut splitted = raw.split(':');
-        let chrom_name =
-            splitted.nth(0).ok_or(MkError::InvalidRegion(raw.to_string()))?;
-        let start_end = splitted.collect::<Vec<&str>>();
-        if start_end.len() != 1 {
-            return Err(MkError::InvalidRegion(raw.to_string()));
-        } else {
-            let start_end = start_end[0];
-            let splitted = start_end
-                .split('-')
-                .map(|x| {
-                    let cleaned = x.replace(",", "");
-                    cleaned
-                        .parse::<u32>()
-                        .map_err(|_| MkError::InvalidRegion(raw.to_string()))
-                })
-                .collect::<Result<Vec<u32>, _>>()?;
-            if splitted.len() != 2 {
-                return Err(MkError::InvalidRegion(raw.to_string()));
-            } else {
-                let start = splitted[0];
-                let end = splitted[1];
-                if end <= start {
-                    return Err(MkError::InvalidRegion(raw.to_string()));
-                }
-                Ok(Self { name: chrom_name.to_owned(), start, end })
-            }
-        }
-    }
-
     fn parse_start_stop(raw: &str) -> Option<(u32, u32)> {
         fn parse_coordinates(input: &str) -> IResult<&str, (u32, u32)> {
             let (rest, start) = nom::character::complete::u32(input)?;
