@@ -22,13 +22,14 @@ use crate::mod_base_code::{
     BaseAndState, BaseState, DnaBase, ModCodeRepr, ProbHistogram,
 };
 use crate::monoid::Moniod;
+use crate::motifs::motif_bed::MotifPositionLookup;
 use crate::position_filter::StrandedPositionFilter;
 use crate::reads_sampler::record_sampler::{Indicator, RecordSampler};
 use crate::record_processor::{RecordProcessor, WithRecords};
 use crate::util::{
     self, get_aligned_pairs_forward, get_master_progress_bar,
     get_query_name_string, get_reference_mod_strand, get_ticker,
-    record_is_primary, Kmer, Strand,
+    record_is_primary, Kmer, Strand, MISSING_SYMBOL, TAB,
 };
 
 /// Read IDs mapped to their base modification probabilities, organized
@@ -397,30 +398,34 @@ pub(crate) struct ModProfile {
 }
 
 impl ModProfile {
-    pub(crate) fn header() -> String {
-        let tab = '\t';
-        format!(
-            "\
-            read_id{tab}\
-            forward_read_position{tab}\
-            ref_position{tab}\
-            chrom{tab}\
-            mod_strand{tab}\
-            ref_strand{tab}\
-            ref_mod_strand{tab}\
-            fw_soft_clipped_start{tab}\
-            fw_soft_clipped_end{tab}\
-            read_length{tab}\
-            mod_qual{tab}\
-            mod_code{tab}\
-            base_qual{tab}\
-            ref_kmer{tab}\
-            query_kmer{tab}\
-            canonical_base{tab}\
-            modified_primary_base{tab}\
-            inferred{tab}\
-            flag"
-        )
+    pub(crate) fn header(with_motifs: bool) -> String {
+        let mut fields = vec![
+            "read_id",
+            "forward_read_position",
+            "ref_position",
+            "chrom",
+            "mod_strand",
+            "ref_strand",
+            "ref_mod_strand",
+            "fw_soft_clipped_start",
+            "fw_soft_clipped_end",
+            "alignment_start",
+            "alignment_end",
+            "read_length",
+            "mod_qual",
+            "mod_code",
+            "base_qual",
+            "ref_kmer",
+            "query_kmer",
+            "canonical_base",
+            "modified_primary_base",
+            "inferred",
+            "flag",
+        ];
+        if with_motifs {
+            fields.push("motifs")
+        }
+        fields.join(&TAB.to_string())
     }
 
     pub(crate) fn within_alignment(&self) -> bool {
@@ -436,11 +441,31 @@ impl ModProfile {
         &self,
         read_id: &str,
         chrom_name: &str,
+        tid: Option<u32>,
+        alignment_start: Option<u64>,
+        alignment_end: Option<u64>,
         reference_seqs: &HashMap<String, Vec<u8>>,
-        kmer_size: usize,
         flag: u16,
+        motif_positions_lookup: Option<&MotifPositionLookup>,
+        with_motifs: bool,
     ) -> String {
         let query_kmer = format!("{}", self.query_kmer);
+        let motif_hits = motif_positions_lookup.and_then(|lu| {
+            match (self.ref_position, tid, self.alignment_strand) {
+                (Some(i), Some(tid), Some(strand)) if i > 0i64 => {
+                    let pos = i as usize;
+                    let motif_hits = lu.get_motif_hits(
+                        tid,
+                        pos,
+                        get_reference_mod_strand(self.mod_strand, strand),
+                    );
+                    motif_hits
+                }
+                _ => None,
+            }
+        });
+
+        let kmer_size = self.query_kmer.size;
         let ref_kmer = if let Some(ref_pos) = self.ref_position {
             if ref_pos < 0 {
                 ".".to_string()
@@ -456,7 +481,6 @@ impl ModProfile {
         } else {
             ".".to_string()
         };
-        let sep = '\t';
         let modified_primary_base = if self.mod_strand == Strand::Negative {
             self.canonical_base.complement().char()
         } else {
@@ -464,27 +488,29 @@ impl ModProfile {
         };
 
         let _within_alignment = self.within_alignment();
-        format!(
+        let mut s = format!(
             "\
-            {read_id}{sep}\
-            {}{sep}\
-            {}{sep}\
-            {chrom_name}{sep}\
-            {}{sep}\
-            {}{sep}\
-            {}{sep}\
-            {}{sep}\
-            {}{sep}\
-            {}{sep}\
-            {}{sep}\
-            {}{sep}\
-            {}{sep}\
-            {}{sep}\
-            {}{sep}\
-            {}{sep}\
-            {}{sep}\
-            {}{sep}\
-            {}\n",
+            {read_id}{TAB}\
+            {}{TAB}\
+            {}{TAB}\
+            {chrom_name}{TAB}\
+            {}{TAB}\
+            {}{TAB}\
+            {}{TAB}\
+            {}{TAB}\
+            {}{TAB}\
+            {}{TAB}\
+            {}{TAB}\
+            {}{TAB}\
+            {}{TAB}\
+            {}{TAB}\
+            {}{TAB}\
+            {}{TAB}\
+            {}{TAB}\
+            {}{TAB}\
+            {}{TAB}\
+            {}{TAB}\
+            {}",
             self.query_position,
             self.ref_position.unwrap_or(-1),
             self.mod_strand.to_char(),
@@ -494,6 +520,8 @@ impl ModProfile {
                 .unwrap_or('.'),
             self.num_soft_clipped_start,
             self.num_soft_clipped_end,
+            alignment_start.map(|x| x as i64).unwrap_or(-1i64),
+            alignment_end.map(|x| x as i64).unwrap_or(-1i64),
             self.read_length,
             self.q_mod,
             self.raw_mod_code,
@@ -504,7 +532,20 @@ impl ModProfile {
             modified_primary_base,
             self.inferred,
             flag,
-        )
+            // motif_hits.unwrap_or_else(|| MISSING_SYMBOL.to_string())
+        );
+
+        if with_motifs {
+            s.push(TAB);
+            if let Some(x) = motif_hits.as_ref() {
+                s.push_str(x.as_str());
+            } else {
+                s.push_str(MISSING_SYMBOL);
+            }
+        }
+
+        s.push_str("\n");
+        s
     }
 }
 
@@ -513,7 +554,8 @@ pub(crate) struct ReadBaseModProfile {
     pub(crate) record_name: String,
     pub(crate) chrom_id: Option<u32>,
     pub(crate) flag: u16,
-    pub(crate) alignment_start: i64,
+    pub(crate) alignment_start: Option<u64>,
+    pub(crate) alignment_end: Option<u64>,
     pub(crate) profile: Vec<ModProfile>,
 }
 
@@ -752,12 +794,21 @@ impl ReadBaseModProfile {
         });
         let flag = record.flags();
         let alignment_start = record.reference_start();
+        let alignment_end = record.reference_end();
+        let alignment_start = if alignment_start >= 0 {
+            Some(alignment_start as u64)
+        } else {
+            None
+        };
+        let alignment_end =
+            if alignment_end >= 0 { Some(alignment_end as u64) } else { None };
 
         Ok(Self {
             record_name: record_name.to_owned(),
             chrom_id: chrom_tid,
             flag,
             alignment_start,
+            alignment_end,
             profile: mod_profiles,
         })
     }
@@ -770,6 +821,7 @@ impl ReadBaseModProfile {
             self.chrom_id,
             self.flag,
             self.alignment_start,
+            self.alignment_end,
             profile,
         )
     }

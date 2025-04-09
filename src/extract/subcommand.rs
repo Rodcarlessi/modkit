@@ -21,6 +21,7 @@ use crate::interval_chunks::ReferenceIntervalsFeeder;
 use crate::logging::init_logging_smart;
 use crate::mod_bam::CollapseMethod;
 use crate::mod_base_code::ModCodeRepr;
+use crate::motifs::motif_bed::MotifPositionLookup;
 use crate::read_ids_to_base_mod_probs::{
     ModProfile, PositionModCalls, ReadsBaseModProfile,
 };
@@ -77,6 +78,7 @@ impl EntryExtractFull {
     ) -> anyhow::Result<(
         Option<ReferenceIntervalsFeeder>,
         ReferencePositionFilter,
+        Option<MotifPositionLookup>,
     )> {
         super::util::load_regions(
             &self.input_args,
@@ -178,14 +180,17 @@ impl EntryExtractFull {
             .map(|raw_region| Region::parse_str(raw_region, &header))
             .transpose()?;
 
-        let (references_and_intervals, reference_position_filter) = self
-            .load_regions(
-                &name_to_tid,
-                region.as_ref(),
-                &chrom_to_seq,
-                &multi_prog,
-                &pool,
-            )?;
+        let (
+            references_and_intervals,
+            reference_position_filter,
+            motif_position_lookup,
+        ) = self.load_regions(
+            &name_to_tid,
+            region.as_ref(),
+            &chrom_to_seq,
+            &multi_prog,
+            &pool,
+        )?;
 
         // allowed to use the sampling schedule if there is an index, if
         // asked for num_reads with no index, scan first N reads
@@ -250,10 +255,11 @@ impl EntryExtractFull {
             );
         });
 
+        let with_motifs = self.input_args.motif.is_some();
         let output_header = if self.input_args.no_headers {
             None
         } else {
-            Some(ModProfile::header())
+            Some(ModProfile::header(with_motifs))
         };
         let mut writer: Box<dyn OutwriterWithMemory<ReadsBaseModProfile>> =
             match self.input_args.out_path.as_str() {
@@ -263,6 +269,7 @@ impl EntryExtractFull {
                         tsv_writer,
                         tid_to_name,
                         chrom_to_seq,
+                        with_motifs,
                     )?;
                     Box::new(writer)
                 }
@@ -278,6 +285,7 @@ impl EntryExtractFull {
                             tsv_writer,
                             tid_to_name,
                             chrom_to_seq,
+                            with_motifs,
                         )?;
                         Box::new(writer)
                     } else {
@@ -290,6 +298,7 @@ impl EntryExtractFull {
                             tsv_writer,
                             tid_to_name,
                             chrom_to_seq,
+                            with_motifs,
                         )?;
                         Box::new(writer)
                     }
@@ -302,7 +311,9 @@ impl EntryExtractFull {
                     n_used.inc(mod_profile.num_reads() as u64);
                     n_failed.inc(mod_profile.num_fails as u64);
                     n_skipped.inc(mod_profile.num_skips as u64);
-                    match writer.write(mod_profile, kmer_size) {
+                    match writer
+                        .write(mod_profile, motif_position_lookup.as_ref())
+                    {
                         Ok(n) => n_rows.inc(n),
                         Err(e) => {
                             error!("failed to write {}", e.to_string());
@@ -551,16 +562,19 @@ impl EntryExtractCalls {
             })
             .transpose()?;
 
-        let (references_and_intervals, reference_position_filter) =
-            super::util::load_regions(
-                &self.input_args,
-                self.using_stdin(),
-                &name_to_tid,
-                region.as_ref(),
-                &chrom_to_seq,
-                &multi_prog,
-                &pool,
-            )?;
+        let (
+            references_and_intervals,
+            reference_position_filter,
+            motif_position_lookup,
+        ) = super::util::load_regions(
+            &self.input_args,
+            self.using_stdin(),
+            &name_to_tid,
+            region.as_ref(),
+            &chrom_to_seq,
+            &multi_prog,
+            &pool,
+        )?;
 
         let caller = if !self.no_filtering {
             // stdin input and want a threshold, not allowed
@@ -607,10 +621,11 @@ impl EntryExtractCalls {
             MultipleThresholdModCaller::new_passthrough()
         };
 
+        let with_motifs = self.input_args.motif.is_some();
         let output_header = if self.input_args.no_headers {
             None
         } else {
-            Some(PositionModCalls::header())
+            Some(PositionModCalls::header(with_motifs))
         };
         let mut writer: Box<dyn OutwriterWithMemory<ReadsBaseModProfile>> =
             match self.input_args.out_path.as_str() {
@@ -622,6 +637,7 @@ impl EntryExtractCalls {
                         chrom_to_seq,
                         caller,
                         self.pass_only,
+                        with_motifs,
                     )?;
                     Box::new(writer)
                 }
@@ -639,6 +655,7 @@ impl EntryExtractCalls {
                             chrom_to_seq,
                             caller,
                             self.pass_only,
+                            with_motifs,
                         )?;
                         Box::new(writer)
                     } else {
@@ -653,6 +670,7 @@ impl EntryExtractCalls {
                             chrom_to_seq,
                             caller,
                             self.pass_only,
+                            with_motifs,
                         )?;
                         Box::new(writer)
                     }
@@ -729,7 +747,9 @@ impl EntryExtractCalls {
                     n_used.inc(mod_profile.num_reads() as u64);
                     n_failed.inc(mod_profile.num_fails as u64);
                     n_skipped.inc(mod_profile.num_skips as u64);
-                    match writer.write(mod_profile, 0) {
+                    match writer
+                        .write(mod_profile, motif_position_lookup.as_ref())
+                    {
                         Ok(n) => n_rows.inc(n),
                         Err(e) => {
                             error!("failed to write {}", e.to_string());

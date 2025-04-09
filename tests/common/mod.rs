@@ -1,9 +1,10 @@
-use anyhow::{anyhow, Result as AnyhowResult};
+use anyhow::{anyhow, bail, Result as AnyhowResult};
 use derive_new::new;
 use mod_kit::mod_bam::{CollapseMethod, EdgeFilter};
 use mod_kit::position_filter::StrandedPositionFilter;
 use mod_kit::summarize::{summarize_modbam, ModSummary};
 use mod_kit::threshold_mod_caller::MultipleThresholdModCaller;
+use serde::Deserialize;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fs::File;
@@ -133,6 +134,19 @@ pub fn check_against_expected_text_file(output_fp: &str, expected_fp: &str) {
         "{output_fp} is not the same as {expected_fp}"
     );
 }
+
+#[derive(Deserialize)]
+pub struct ExtractFullRecord {
+    read_id: String,
+    forward_read_position: usize,
+    ref_position: i64,
+    mod_code: char,
+    #[serde(rename(deserialize = "ref_strand"))]
+    strand: char,
+    read_length: usize,
+    chrom: String,
+}
+
 #[derive(new, Eq, PartialEq, Debug)]
 pub struct ModData {
     pub q_pos: usize,
@@ -141,7 +155,7 @@ pub struct ModData {
     pub strand: char,
     pub read_length: usize,
     pub contig: String,
-    pub data: String,
+    // pub data: String,
 }
 
 impl PartialOrd for ModData {
@@ -165,29 +179,46 @@ impl Ord for ModData {
 pub fn parse_mod_profile(
     fp: &PathBuf,
 ) -> anyhow::Result<HashMap<String, Vec<ModData>>> {
-    let mut reader =
-        BufReader::new(File::open(fp)?).lines().map(|l| l.unwrap());
     let mut agg = HashMap::new();
-    let _ = reader.next(); // discard header
-    while let Some(line) = reader.next() {
-        let parts = line.split_ascii_whitespace().collect::<Vec<&str>>();
-        let read_id = parts[0].to_owned();
-        let q_pos = parts[1].parse::<usize>().unwrap();
-        let ref_pos = parts[2].parse::<i64>().unwrap();
-        let mod_code = parts[11].parse::<char>().unwrap();
-        let strand = parts[5].parse::<char>().unwrap();
-        let read_length = parts[9].parse::<usize>().unwrap();
-        let contig = parts[3].to_owned();
-        agg.entry(read_id).or_insert(Vec::new()).push(ModData::new(
-            q_pos,
-            ref_pos,
-            mod_code,
-            strand,
-            read_length,
-            contig,
-            line,
-        ));
+    let mut reader = csv::ReaderBuilder::new()
+        .delimiter('\t' as u8)
+        .has_headers(true)
+        .from_path(fp)
+        .unwrap();
+
+    for record in reader.deserialize() {
+        let record: ExtractFullRecord = record.unwrap();
+        let read_id = record.read_id;
+        agg.entry(read_id).or_insert_with(Vec::new).push(ModData::new(
+            record.forward_read_position,
+            record.ref_position,
+            record.mod_code,
+            record.strand,
+            record.read_length,
+            record.chrom,
+        ))
     }
+    // let mut reader =
+    //     BufReader::new(File::open(fp)?).lines().map(|l| l.unwrap());
+    // while let Some(line) = reader.next() {
+    //     let parts = line.split_ascii_whitespace().collect::<Vec<&str>>();
+    //     let read_id = parts[0].to_owned();
+    //     let q_pos = parts[1].parse::<usize>().unwrap();
+    //     let ref_pos = parts[2].parse::<i64>().unwrap();
+    //     let mod_code = parts[13].parse::<char>().unwrap();
+    //     let strand = parts[5].parse::<char>().unwrap();
+    //     let read_length = parts[11].parse::<usize>().unwrap();
+    //     let contig = parts[3].to_owned();
+    //     agg.entry(read_id).or_insert(Vec::new()).push(ModData::new(
+    //         q_pos,
+    //         ref_pos,
+    //         mod_code,
+    //         strand,
+    //         read_length,
+    //         contig,
+    //         // line,
+    //     ));
+    // }
     for (_, dat) in agg.iter_mut() {
         dat.sort()
     }
@@ -195,11 +226,20 @@ pub fn parse_mod_profile(
     Ok(agg)
 }
 
-pub fn check_legal_csv<const SEP: u8>(fp: &PathBuf) {
+pub fn check_legal_csv<const SEP: u8>(fp: &PathBuf) -> anyhow::Result<()> {
     let mut reader = csv::ReaderBuilder::new()
         .delimiter(SEP)
         .from_reader(File::open(fp).expect("should open file"));
+    let mut i = 1;
     for record in reader.records() {
-        let _ = record.expect("should be valid record");
+        match record {
+            Ok(_) => {}
+            Err(e) => {
+                bail!("failed to parse line at {i}, {e}")
+            }
+        }
+        i += 1;
     }
+
+    Ok(())
 }

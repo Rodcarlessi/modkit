@@ -2,7 +2,7 @@ use crate::common::{
     check_against_expected_text_file, parse_mod_profile, ModData,
 };
 use anyhow::{anyhow, Context};
-use common::run_modkit;
+use common::{check_legal_csv, run_modkit, ExtractFullRecord};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::BufRead;
@@ -54,12 +54,9 @@ fn parse_bed_file(fp: &PathBuf) -> HashMap<String, HashSet<(i64, char)>> {
 
 #[test]
 fn test_extract_mod_data_ord() {
-    let mod_data1 =
-        ModData::new(0, 1, 'm', '+', 100, "".to_string(), "".to_string());
-    let mod_data2 =
-        ModData::new(0, 1, 'h', '+', 100, "".to_string(), "".to_string());
-    let mod_data3 =
-        ModData::new(1, 1, 'h', '+', 100, "".to_string(), "".to_string());
+    let mod_data1 = ModData::new(0, 1, 'm', '+', 100, "".to_string());
+    let mod_data2 = ModData::new(0, 1, 'h', '+', 100, "".to_string());
+    let mod_data3 = ModData::new(1, 1, 'h', '+', 100, "".to_string());
     assert!(mod_data2 < mod_data1);
     assert!(mod_data1 < mod_data3);
 }
@@ -68,6 +65,7 @@ fn check_mod_profiles_same(
     output_fp: &PathBuf,
     expected_fp: &PathBuf,
 ) -> anyhow::Result<()> {
+    check_legal_csv::<{ '\t' as u8 }>(output_fp)?;
     let output_profile = parse_mod_profile(output_fp).unwrap();
     let expected_profile = parse_mod_profile(expected_fp).unwrap();
     if output_profile == expected_profile {
@@ -91,6 +89,20 @@ fn check_mod_profiles_same(
     }
 }
 
+// #[test]
+// fn test_common_parse_extract_full() {
+//     let mut reader = csv::ReaderBuilder::new()
+//         .delimiter('\t' as u8)
+//         .has_headers(true)
+//         .from_path(
+//             "tests/resources/bc_anchored_10_reads.sorted.methylprofile.tsv",
+//         )
+//         .unwrap();
+//     for record in reader.deserialize() {
+//         let _record: ExtractFullRecord = record.unwrap();
+//     }
+// }
+
 #[test]
 fn test_extract_correct_output() {
     let out_fp = std::env::temp_dir().join("test_extract_correct_output.tsv");
@@ -104,6 +116,7 @@ fn test_extract_correct_output() {
         "--force",
     ])
     .unwrap();
+    println!("> {out_fp:?}");
     check_mod_profiles_same(
         &out_fp,
         &Path::new(
@@ -483,13 +496,22 @@ fn test_extract_cpg_motif() {
     .unwrap();
 
     let mod_profile = parse_mod_profile(&extract_tsv).unwrap();
-    for (_read, mod_data) in mod_profile {
+    for (read, mod_data) in mod_profile {
         for row in mod_data {
             if row.strand == '+' {
-                assert!(pos_positions.contains(&row.ref_pos));
+                assert!(
+                    pos_positions.contains(&row.ref_pos),
+                    "missing {}?",
+                    row.ref_pos
+                );
             } else {
                 assert_eq!(row.strand, '-');
-                assert!(neg_positions.contains(&row.ref_pos));
+                assert!(
+                    neg_positions.contains(&row.ref_pos),
+                    "missing {}, {read}: {:?}",
+                    row.ref_pos,
+                    row
+                );
             }
         }
     }
@@ -509,6 +531,7 @@ fn test_extract_calls_regression() {
         "--force",
     ])
     .unwrap();
+    check_legal_csv::<{ '\t' as u8 }>(&extract_tsv).unwrap();
     check_against_expected_text_file(
         extract_tsv.to_str().unwrap(),
         "tests/resources/test_read_calls_estimate_thresh.tsv",
