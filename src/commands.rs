@@ -14,7 +14,6 @@ use crate::dmr::subcommands::BedMethylDmr;
 use crate::entropy::subcommand::MethylationEntropy;
 use crate::errs::{MkError, MkResult};
 use crate::extract::subcommand::ExtractMods;
-use crate::find_motifs::subcommand::{EntryFindMotifs, EntryMotifs};
 use crate::localise::subcommand::EntryLocalize;
 use crate::logging::init_logging;
 use crate::mod_bam::{
@@ -23,6 +22,7 @@ use crate::mod_bam::{
 use crate::mod_base_code::{DnaBase, ModCodeRepr};
 use crate::modbam_util::subcommands::EntryModBam;
 use crate::monoid::Moniod;
+use crate::motifs::subcommand::{EntryFindMotifs, EntryMotifs};
 use crate::pileup::subcommand::{DuplexModBamPileup, ModBamPileup};
 use crate::position_filter::StrandedPositionFilter;
 use crate::read_ids_to_base_mod_probs::ReadIdsToBaseModProbs;

@@ -36,4 +36,5 @@ cargo install --git https://github.com/nanoporetech/modkit.git
 ## Notes and troubleshooting
 1. [General troubleshooting](./troubleshooting.md)
 2. [Threshold evaluation examples](./filtering_details.md) (for advanced users)
+3. [Querying the logs in `motif search`](./motif_search_structured_logging.md)
 

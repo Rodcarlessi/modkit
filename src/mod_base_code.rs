@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Display, Formatter};
 
 use crate::errs::{MkError, MkResult};
-use crate::find_motifs::iupac::nt_bytes;
+use crate::motifs::iupac::nt_bytes;
 use anyhow::anyhow;
 use clap::ValueEnum;
 use common_macros::hash_map;

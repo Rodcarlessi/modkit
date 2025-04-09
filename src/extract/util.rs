@@ -1,10 +1,10 @@
 use crate::extract::args::InputArgs;
-use crate::find_motifs::motif_bed::{find_motif_hits, RegexMotif};
 use crate::interval_chunks::{
     ReferenceIntervalsFeeder, TotalLength, WithPrevEnd,
 };
 use crate::mod_bam::{CollapseMethod, EdgeFilter, TrackingModRecordIter};
 use crate::monoid::Moniod;
+use crate::motifs::motif_bed::{find_motif_hits, RegexMotif};
 use crate::position_filter::{GenomeIntervals, Iv, StrandedPositionFilter};
 use crate::read_ids_to_base_mod_probs::{
     ModProfile, ReadBaseModProfile, ReadsBaseModProfile,

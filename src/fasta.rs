@@ -8,7 +8,7 @@ use rayon::prelude::*;
 use rust_lapper::{Interval, Lapper};
 use rustc_hash::FxHashMap;
 
-use crate::find_motifs::motif_bed::{
+use crate::motifs::motif_bed::{
     find_motif_hits, MotifLocations, MultipleMotifLocations, RegexMotif,
 };
 use crate::position_filter::StrandedPositionFilter;

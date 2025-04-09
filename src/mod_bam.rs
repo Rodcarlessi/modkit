@@ -17,8 +17,8 @@ use rust_htslib::bam::record::Aux;
 use rustc_hash::FxHashMap;
 
 use crate::errs::{ConflictError, MkError, MkResult};
-use crate::find_motifs::iupac::nt_bytes;
 use crate::mod_base_code::{DnaBase, ModCodeRepr, ParseChar};
+use crate::motifs::iupac::nt_bytes;
 use crate::util::{
     get_forward_sequence, get_tag, record_is_not_primary, Strand,
 };
