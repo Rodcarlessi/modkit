@@ -1659,6 +1659,13 @@ Modified Base Options:
           the bottom strand. The --cpg argument is short hand for --motif CG 0.
           This argument can be passed multiple times
 
+      --annotate-motifs
+          When used with `--motif` or `--cpg` emit all modified base alignment
+          information even if it does not align to a reference motif, but
+          annotate which aligned positions match which motifs in the "motifs"
+          column. "." will be used when an aligned position does not match a
+          motif
+
       --cpg
           Only output counts at CpG motifs. Requires a reference sequence to be
           provided
@@ -1820,6 +1827,13 @@ Modified Base Options:
           the bottom strand. The --cpg argument is short hand for --motif CG 0.
           This argument can be passed multiple times
 
+      --annotate-motifs
+          When used with `--motif` or `--cpg` emit all modified base alignment
+          information even if it does not align to a reference motif, but
+          annotate which aligned positions match which motifs in the "motifs"
+          column. "." will be used when an aligned position does not match a
+          motif
+
       --cpg
           Only output counts at CpG motifs. Requires a reference sequence to be
           provided
@@ -1920,6 +1934,14 @@ Search for modification-enriched subsequences in a reference genome
 Usage: modkit motif search [OPTIONS] --in-bedmethyl <IN_BEDMETHYL> --ref <REFERENCE_FASTA>
 
 Options:
+      --force-override-spec
+          Force override SAM specification of association of modification codes
+          to primary sequence bases
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Input Options:
   -i, --in-bedmethyl <IN_BEDMETHYL>
           Input bedmethyl table, can be used directly from modkit pileup
 
@@ -1929,13 +1951,6 @@ Options:
       --contig <CONTIG>
           Use only bedMethyl records from this contig, requires that the
           bedMethyl be BGZIP-compressed and tabix-indexed
-
-      --force-override-spec
-          Force override SAM specification of association of modification codes
-          to primary sequence bases
-
-  -h, --help
-          Print help (see a summary with '-h')
 
 Compute Options:
   -t, --threads <THREADS>
@@ -1954,23 +1969,6 @@ Logging Options:
 
       --suppress-progress
           Disable the progress bars
-
-Output Options:
-  -o, --out-table <OUT_TABLE>
-          Optionally output a machine-parsable TSV (human-readable table will
-          always be output to the log)
-
-      --eval-motifs-table <OUT_KNOWN_TABLE>
-          Optionally output machine parsable table with known motif modification
-          frequencies that were not found during search
-
-      --known-motif <KNOWN_MOTIFS> <KNOWN_MOTIFS> <KNOWN_MOTIFS>
-          Format should be <sequence> <offset> <mod_code>
-
-      --known-motifs-table <KNOWN_MOTIFS_TABLE>
-          Path to known motifs in tabular format. Tab-separated values:
-          <mod_code>\t<motif_seq>\t<offset>. May have the same header as the
-          output table from this command
 
 Search Options:
       --low-thresh <LOW_THRESHOLD>
@@ -1985,14 +1983,67 @@ Search Options:
           
           [default: 0.6]
 
+      --min-frac-mod <FRAC_SITES_THRESH>
+          Minimum fraction of sites in the genome to be "high-modification" for
+          a motif to be considered
+          
+          [default: 0.85]
+
+      --context-size <CONTEXT_SIZE> <CONTEXT_SIZE>
+          Upstream and downstream number of bases to search for a motif sequence
+          around a modified base. Example: --context-size 12 12
+          
+          [default: 12 12]
+
+      --min-coverage <MIN_COVERAGE>
+          Minimum valid coverage in the bedMethyl to consider a record valid
+          
+          [default: 5]
+
+      --min-sites <MIN_SITES>
+          Minimum number of total sites in the genome required for a motif to be
+          considered
+          
+          [default: 300]
+
       --min-log-odds <MIN_LOG_ODDS>
           Minimum log-odds to consider a motif sequence to be enriched
           
           [default: 1.5]
 
+      --init-context-size <INIT_CONTEXT_SIZE> <INIT_CONTEXT_SIZE>
+          Initial "fixed" seed window size in base pairs around the modified
+          base. Example: --init-context-size 2 2
+          
+          [default: 2 2]
+
+      --mod-code <MOD_CODES>
+          Specify which modification codes to process, default will process all
+          modification codes found in the input bedMethyl file
+
+Output Options:
+  -o, --out-table <OUT_TABLE>
+          Optionally output a machine-parsable TSV (human-readable table will
+          always be output to the log)
+
+      --known-motif <KNOWN_MOTIFS> <KNOWN_MOTIFS> <KNOWN_MOTIFS>
+          Include statistics on a suspected or known motif. Format should be
+          <sequence> <offset> <mod_code>
+
+      --known-motifs-table <KNOWN_MOTIFS_TABLE>
+          Path to known motifs in tabular format. Tab-separated values:
+          <mod_code>\t<motif_seq>\t<offset>. May have the same header as the
+          output table from this command
+
+      --eval-motifs-table <OUT_KNOWN_TABLE>
+          Optionally output machine parsable table with known motif modification
+          frequencies that were not found during search
+
+Exhaustive Search Options:
       --exhaustive-seed-min-log-odds <EXHAUSTIVE_SEED_MIN_LOG_ODDS>
-          Minimum log-odds to consider a motif sequence to be enriched when
-          performing exhaustive search
+          Minimum log-odds to consider a motif seed sequence to be enriched when
+          performing exhaustive search, decreasing this number will increase the
+          number of seeds searched and thus computational time
           
           [default: 2.5]
 
@@ -2006,38 +2057,44 @@ Search Options:
           Skip the exhaustive search phase, saves time but the results may be
           less sensitive
 
-      --min-coverage <MIN_COVERAGE>
-          Minimum coverage in the bedMethyl to consider a record valid
-          
-          [default: 5]
+      --search-top-pct <SEARCH_TOP_PCT>
+          During exhaustive search, instead of searching all seeds with log-odds
+          above `exhaustive_seed_min_log_odds`, only search the top X-percent of
+          seeds. Can be used with `min_exhaustive_seeds` and
+          `max_exhaustive_seeds`
 
-      --context-size <CONTEXT_SIZE> <CONTEXT_SIZE>
-          Upstream and downstream number of bases to search for a motif sequence
-          around a modified base. Example: --context-size 12 12
-          
-          [default: 12 12]
+      --narrow-search
+          When used in conjunction with `search_top_pct`, search the top
+          X-percent of seeds, and then narrow the search space by removing
+          contexts matching any motifs found. Then iterate until zero additional
+          motifs are found or another stopping condition is reached
 
-      --min-sites <MIN_SITES>
-          Minimum number of total sites in the genome required for a motif to be
-          considered
-          
-          [default: 300]
+      --search-timeout <SEARCH_TIMEOUT>
+          A stopping condition when using `--narrow-search`, stop once exaustive
+          search for a modification code has been worked on for this long
 
-      --min-frac-mod <FRAC_SITES_THRESH>
-          Minimum fraction of sites in the genome to be "high-modification" for
-          a motif to be considered
+      --search-batch-size <SEARCH_BATCH_SIZE>
+          Set the batch size when performing a simple timeout on search. At
+          least this many seeds will be evaluated
           
-          [default: 0.85]
+          [default: 100]
 
-      --init-context-size <INIT_CONTEXT_SIZE> <INIT_CONTEXT_SIZE>
-          Initial "fixed" seed window size in base pairs around the modified
-          base. Example: --init-context-size 2 2
+      --max-exhaustive-seeds <MAX_EXHAUSTIVE_SEEDS>
+          Set the maximum number of exhaustive seeds to be searched in a batch.
+          Overrides the X-percent of seeds to be searched when that number
+          exceeds this setting
+
+      --min-exhaustive-seeds <MIN_EXHAUSTIVE_SEEDS>
+          Search at least this many seeds. Overrides the X-percent of seeds to
+          be searched when that number is less than this setting
           
-          [default: 2 2]
+          [default: 20]
 
-      --mod-code <MOD_CODES>
-          Specify which modification codes to process, default will process all
-          modification codes found in the input bedMethyl file
+      --max-narrow-iters <MAX_NARROW_ITERS>
+          Stopping condition when using `--narrow-search` and
+          `--search-top-pct`, stop after this many iterations regardless if the
+          timeout is provided and has been reached. Exaustive search will still
+          stop when once no more motifs are found
 ```
 
 ## motif evaluate
@@ -2047,6 +2104,17 @@ Calculate enrichment statistics on a set of motifs from a bedMethyl table
 Usage: modkit motif evaluate [OPTIONS] --in-bedmethyl <IN_BEDMETHYL> --ref <REFERENCE_FASTA>
 
 Options:
+      --force-override-spec
+          Force override SAM specification of association of modification codes
+          to primary sequence bases
+
+      --suppress-table
+          Don't print final table to stderr (will still go to log file)
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Input Options:
   -i, --in-bedmethyl <IN_BEDMETHYL>
           Input bedmethyl table, can be used directly from modkit pileup
 
@@ -2057,12 +2125,40 @@ Options:
           Use only bedMethyl records from this contig, requires that the
           bedMethyl be BGZIP-compressed and tabix-indexed
 
-      --force-override-spec
-          Force override SAM specification of association of modification codes
-          to primary sequence bases
+Compute Options:
+  -t, --threads <THREADS>
+          Number of threads to use
+          
+          [default: 4]
 
+      --io-threads <IO_THREADS>
+          Number of tabix/bgzf IO threads to use
+          
+          [default: 2]
+
+Logging Options:
+      --log-filepath <LOG_FILEPATH>
+          Output log to this file
+
+      --suppress-progress
+          Disable the progress bars
+
+Output Options:
+      --known-motif <KNOWN_MOTIFS> <KNOWN_MOTIFS> <KNOWN_MOTIFS>
+          Format should be <sequence> <offset> <mod_code>
+
+      --known-motifs-table <KNOWN_MOTIFS_TABLE>
+          Path to known motifs in tabular format. Tab-separated values:
+          <mod_code>\t<motif_seq>\t<offset>. May have the same header as the
+          output table from this command
+
+      --out <OUT_TABLE>
+          Machine-parsable table of refined motifs. Human-readable table always
+          printed to stderr and log
+
+Search Options:
       --min-coverage <MIN_COVERAGE>
-          Minimum coverage in the bedMethyl to consider a record valid
+          Minimum valid coverage in the bedMethyl to consider a record valid
           
           [default: 5]
 
@@ -2083,43 +2179,6 @@ Options:
           be "high modification" or enriched for modification
           
           [default: 0.6]
-
-      --suppress-table
-          Don't print final table to stderr (will still go to log file)
-
-  -h, --help
-          Print help (see a summary with '-h')
-
-Compute Options:
-  -t, --threads <THREADS>
-          Number of threads to use
-          
-          [default: 4]
-
-      --io-threads <IO_THREADS>
-          Number of tabix/bgzf IO threads to use
-          
-          [default: 2]
-
-Logging Options:
-      --log-filepath <LOG_FILEPATH>
-          Output log to this file
-
-      --suppress-progress
-          Disable the progress bars
-
-Output Options:
-      --known-motif <KNOWN_MOTIFS> <KNOWN_MOTIFS> <KNOWN_MOTIFS>
-          Format should be <sequence> <offset> <mod_code>
-
-      --known-motifs-table <KNOWN_MOTIFS_TABLE>
-          Path to known motifs in tabular format. Tab-separated values:
-          <mod_code>\t<motif_seq>\t<offset>. May have the same header as the
-          output table from this command
-
-      --out <OUT_TABLE>
-          Machine-parsable table of refined motifs. Human-readable table always
-          printed to stderr and log
 ```
 
 ## motif refine
@@ -2130,55 +2189,6 @@ bedMethyl table
 Usage: modkit motif refine [OPTIONS] --in-bedmethyl <IN_BEDMETHYL> --ref <REFERENCE_FASTA>
 
 Options:
-  -i, --in-bedmethyl <IN_BEDMETHYL>
-          Input bedmethyl table, can be used directly from modkit pileup
-
-  -r, --ref <REFERENCE_FASTA>
-          Reference sequence in FASTA format used for the pileup
-
-      --contig <CONTIG>
-          Use only bedMethyl records from this contig, requires that the
-          bedMethyl be BGZIP-compressed and tabix-indexed
-
-      --force-override-spec
-          Force override SAM specification of association of modification codes
-          to primary sequence bases
-
-  -h, --help
-          Print help (see a summary with '-h')
-
-Compute Options:
-  -t, --threads <THREADS>
-          Number of threads to use
-          
-          [default: 4]
-
-      --io-threads <IO_THREADS>
-          Number of tabix/bgzf IO threads to use
-          
-          [default: 2]
-
-Logging Options:
-      --log-filepath <LOG_FILEPATH>
-          Output log to this file
-
-      --suppress-progress
-          Disable the progress bars
-
-Output Options:
-      --known-motif <KNOWN_MOTIFS> <KNOWN_MOTIFS> <KNOWN_MOTIFS>
-          Format should be <sequence> <offset> <mod_code>
-
-      --known-motifs-table <KNOWN_MOTIFS_TABLE>
-          Path to known motifs in tabular format. Tab-separated values:
-          <mod_code>\t<motif_seq>\t<offset>. May have the same header as the
-          output table from this command
-
-      --out <OUT_TABLE>
-          Machine-parsable table of refined motifs. Human-readable table always
-          printed to stderr and log
-
-Refine Options:
       --min_refine_frac_mod <MIN_REFINE_FRAC_MODIFIED>
           Minimum fraction of sites in the genome to be "high-modification" for
           a motif to be further refined, otherwise it will be discarded
@@ -2191,6 +2201,55 @@ Refine Options:
           
           [default: 300]
 
+      --force-override-spec
+          Force override SAM specification of association of modification codes
+          to primary sequence bases
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Input Options:
+  -i, --in-bedmethyl <IN_BEDMETHYL>
+          Input bedmethyl table, can be used directly from modkit pileup
+
+  -r, --ref <REFERENCE_FASTA>
+          Reference sequence in FASTA format used for the pileup
+
+      --contig <CONTIG>
+          Use only bedMethyl records from this contig, requires that the
+          bedMethyl be BGZIP-compressed and tabix-indexed
+
+Compute Options:
+  -t, --threads <THREADS>
+          Number of threads to use
+          
+          [default: 4]
+
+      --io-threads <IO_THREADS>
+          Number of tabix/bgzf IO threads to use
+          
+          [default: 2]
+
+Logging Options:
+      --log-filepath <LOG_FILEPATH>
+          Output log to this file
+
+      --suppress-progress
+          Disable the progress bars
+
+Output Options:
+      --known-motif <KNOWN_MOTIFS> <KNOWN_MOTIFS> <KNOWN_MOTIFS>
+          Format should be <sequence> <offset> <mod_code>
+
+      --known-motifs-table <KNOWN_MOTIFS_TABLE>
+          Path to known motifs in tabular format. Tab-separated values:
+          <mod_code>\t<motif_seq>\t<offset>. May have the same header as the
+          output table from this command
+
+      --out <OUT_TABLE>
+          Machine-parsable table of refined motifs. Human-readable table always
+          printed to stderr and log
+
 Search Options:
       --low-thresh <LOW_THRESHOLD>
           Fraction modified threshold below which consider a genome location to
@@ -2204,31 +2263,11 @@ Search Options:
           
           [default: 0.6]
 
-      --min-log-odds <MIN_LOG_ODDS>
-          Minimum log-odds to consider a motif sequence to be enriched
+      --min-frac-mod <FRAC_SITES_THRESH>
+          Minimum fraction of sites in the genome to be "high-modification" for
+          a motif to be considered
           
-          [default: 1.5]
-
-      --exhaustive-seed-min-log-odds <EXHAUSTIVE_SEED_MIN_LOG_ODDS>
-          Minimum log-odds to consider a motif sequence to be enriched when
-          performing exhaustive search
-          
-          [default: 2.5]
-
-      --exhaustive-seed-len <EXHAUSTIVE_SEED_LEN>
-          Exhaustive search seed length, increasing this value increases
-          computational time
-          
-          [default: 3]
-
-      --skip-search
-          Skip the exhaustive search phase, saves time but the results may be
-          less sensitive
-
-      --min-coverage <MIN_COVERAGE>
-          Minimum coverage in the bedMethyl to consider a record valid
-          
-          [default: 5]
+          [default: 0.85]
 
       --context-size <CONTEXT_SIZE> <CONTEXT_SIZE>
           Upstream and downstream number of bases to search for a motif sequence
@@ -2236,17 +2275,21 @@ Search Options:
           
           [default: 12 12]
 
+      --min-coverage <MIN_COVERAGE>
+          Minimum valid coverage in the bedMethyl to consider a record valid
+          
+          [default: 5]
+
       --min-sites <MIN_SITES>
           Minimum number of total sites in the genome required for a motif to be
           considered
           
           [default: 300]
 
-      --min-frac-mod <FRAC_SITES_THRESH>
-          Minimum fraction of sites in the genome to be "high-modification" for
-          a motif to be considered
+      --min-log-odds <MIN_LOG_ODDS>
+          Minimum log-odds to consider a motif sequence to be enriched
           
-          [default: 0.85]
+          [default: 1.5]
 ```
 
 ## dmr pair
@@ -2363,6 +2406,10 @@ Segmentation Options:
           but potentially higher sensitivity
 
 Logging Options:
+      --careful
+          Log out which sequences are in common between the samples and the
+          reference FASTA, useful for debugging
+
       --log-filepath <LOG_FILEPATH>
           File to write logs to, it's recommended to use this option
 
@@ -2375,7 +2422,7 @@ Logging Options:
           (debug) regions that are missing fatal => log (error) and exit the
           program when a region is missing
           
-          [default: warn]
+          [default: quiet]
           [possible values: quiet, warn, fail]
 
 Compute Options:
@@ -2477,6 +2524,10 @@ Sample Options:
           this will be logged
   -k, --mask
           Respect soft masking in the reference FASTA
+      --min-valid-coverage <MIN_VALID_COVERAGE>
+          Minimum valid coverage required to use an entry from a bedMethyl. See
+          the help for pileup for the specification and description of valid
+          coverage [default: 0]
 
 Output Options:
       --header             Include header in output
@@ -2493,7 +2544,7 @@ Logging Options:
           How to handle regions found in the `--regions` BED file. quiet =>
           ignore regions that are not found in the tabix header warn => log
           (debug) regions that are missing fatal => log (error) and exit the
-          program when a region is missing [default: warn] [possible values:
+          program when a region is missing [default: quiet] [possible values:
           quiet, warn, fail]
 
 Compute Options:
@@ -2501,12 +2552,6 @@ Compute Options:
           Number of threads to use [default: 4]
       --io-threads <IO_THREADS>
           Number of threads to use when for decompression [default: 4]
-
-Sampe Options:
-      --min-valid-coverage <MIN_VALID_COVERAGE>
-          Minimum valid coverage required to use an entry from a bedMethyl. See
-          the help for pileup for the specification and description of valid
-          coverage [default: 0]
 ```
 
 ## bedmethyl merge
