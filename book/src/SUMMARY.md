@@ -14,6 +14,7 @@
         - [Making a motif BED file](./intro_motif_bed.md)
         - [Find highly modified motif sequences](./intro_find_motifs.md)
         - [Evaluate and refine a table of known motifs](./evaluate_motif.md)
+        - [Structured logging schema](./motif_search_structured_logging.md)
     - [Extracting read information to a table](./intro_extract.md)
     - [Investigating patterns with `localise`](./intro_localize.md)
     - [Perform differential methylation scoring](./intro_dmr.md)

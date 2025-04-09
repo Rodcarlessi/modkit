@@ -11,18 +11,20 @@ use prettytable::{row, Table};
 use rayon::{prelude::*, ThreadPool};
 use rustc_hash::FxHashMap;
 
-use crate::find_motifs::motif_bed::motif_bed;
-use crate::find_motifs::{
+use crate::logging::{init_logging, init_tracing};
+use crate::mod_base_code::{DnaBase, ModCodeRepr};
+use crate::motifs::motif_bed::motif_bed;
+use crate::motifs::{
     find_motifs_for_mod, load_bedmethyl_and_references, make_tables,
     merge_motifs, parse_known_motifs, parse_motifs_from_table,
     parse_raw_known_motifs, EnrichedMotif, EnrichedMotifData, KmerMask,
-    KmerModificationDb, MotifRelationship,
+    KmerModificationDb, MotifRelationship, SearchConfig, Stage,
 };
-use crate::logging::init_logging;
-use crate::mod_base_code::{DnaBase, ModCodeRepr};
 use crate::util::{get_human_readable_table, get_subroutine_progress_bar};
 
-use super::args::{InputArgs, KnownMotifsArgs, RefineArgs};
+use super::args::{
+    ExhaustiveSearchOptions, InputArgs, KnownMotifsArgs, MotifParameters,
+};
 
 #[derive(Subcommand)]
 pub enum EntryMotifs {
@@ -55,24 +57,15 @@ impl EntryMotifs {
 pub struct EntryFindMotifs {
     #[clap(flatten)]
     input_args: InputArgs,
+    #[clap(flatten)]
+    motif_parameters: MotifParameters,
     /// Optionally output a machine-parsable TSV (human-readable table will
     /// always be output to the log).
     #[clap(help_heading = "Output Options")]
     #[arg(short = 'o', long)]
     out_table: Option<PathBuf>,
-    /// Optionally output machine parsable table with known motif
-    /// modification frequencies that were not found during search.
-    #[clap(help_heading = "Output Options")]
-    #[arg(long = "eval-motifs-table")]
-    out_known_table: Option<PathBuf>,
-    #[clap(flatten)]
-    refine_args: RefineArgs,
-    /// Initial "fixed" seed window size in base pairs around the modified
-    /// base. Example: --init-context-size 2 2
-    #[clap(help_heading = "Search Options")]
-    #[arg(long, num_args=2, default_values_t=vec![2, 2])]
-    init_context_size: Vec<usize>,
-    /// Format should be <sequence> <offset> <mod_code>.
+    /// Include statistics on a suspected or known motif. Format should be
+    /// <sequence> <offset> <mod_code>.
     #[clap(help_heading = "Output Options")]
     #[arg(long="known-motif", num_args = 3, action = clap::ArgAction::Append)]
     pub known_motifs: Option<Vec<String>>,
@@ -82,6 +75,18 @@ pub struct EntryFindMotifs {
     #[clap(help_heading = "Output Options")]
     #[arg(long = "known-motifs-table")]
     pub known_motifs_table: Option<PathBuf>,
+    /// Optionally output machine parsable table with known motif
+    /// modification frequencies that were not found during search.
+    #[clap(help_heading = "Output Options")]
+    #[arg(long = "eval-motifs-table")]
+    out_known_table: Option<PathBuf>,
+    #[clap(flatten)]
+    refine_args: ExhaustiveSearchOptions,
+    /// Initial "fixed" seed window size in base pairs around the modified
+    /// base. Example: --init-context-size 2 2
+    #[clap(help_heading = "Search Options")]
+    #[arg(long, num_args=2, default_values_t=vec![2, 2])]
+    init_context_size: Vec<usize>,
     /// Specify which modification codes to process, default will process all
     /// modification codes found in the input bedMethyl file
     #[clap(help_heading = "Search Options")]
@@ -95,7 +100,10 @@ pub struct EntryFindMotifs {
 
 impl EntryFindMotifs {
     fn get_context(&self) -> [u64; 2] {
-        [self.refine_args.context_size[0], self.refine_args.context_size[1]]
+        [
+            self.motif_parameters.context_size[0],
+            self.motif_parameters.context_size[1],
+        ]
     }
 
     fn load_mod_db(
@@ -107,10 +115,10 @@ impl EntryFindMotifs {
             &self.input_args.reference_fasta,
             &self.input_args.in_bedmethyl,
             self.input_args.contig.clone(),
-            self.refine_args.min_coverage,
+            self.motif_parameters.min_coverage,
             self.get_context(),
-            self.refine_args.low_threshold,
-            self.refine_args.high_threshold,
+            self.motif_parameters.low_threshold,
+            self.motif_parameters.high_threshold,
             multi_progress,
             self.input_args.io_threads,
             pool,
@@ -122,8 +130,8 @@ impl EntryFindMotifs {
         mod_code_lookup: &HashMap<ModCodeRepr, DnaBase>,
     ) -> anyhow::Result<Option<Vec<EnrichedMotif>>> {
         let context_size = [
-            self.refine_args.context_size[0] as usize,
-            self.refine_args.context_size[1] as usize,
+            self.motif_parameters.context_size[0] as usize,
+            self.motif_parameters.context_size[1] as usize,
         ];
         let mut known_motifs = Vec::new();
         let cli_motifs = self
@@ -177,8 +185,9 @@ impl EntryFindMotifs {
     }
 
     pub fn run(&self) -> anyhow::Result<()> {
-        let _ = init_logging(self.input_args.log_filepath.as_ref());
-        if self.refine_args.context_size.len() != 2 {
+        let _guard = init_tracing(self.input_args.log_filepath.as_ref())
+            .context("failed to init logging")?;
+        if self.motif_parameters.context_size.len() != 2 {
             bail!("context-size must be 2 elements")
         }
         if self.init_context_size.len() != 2 {
@@ -193,6 +202,106 @@ impl EntryFindMotifs {
                 )
             }
         }
+
+        let sanity_check_pct = |p: f32| -> anyhow::Result<f32> {
+            if p >= 100f32 {
+                bail!("pct cannot be greater than 100%")
+            } else if p <= 0f32 {
+                bail!("pct cannot be less than or equal to zero")
+            } else {
+                Ok(p / 100f32)
+            }
+        };
+
+        let (max_seeds, max_seeds_message) = if let Some(max_exhaustive_seeds) =
+            self.refine_args.max_exhaustive_seeds
+        {
+            (
+                max_exhaustive_seeds,
+                format!(
+                    ", or maximum of {max_exhaustive_seeds} seeds at a time"
+                ),
+            )
+        } else {
+            (usize::MAX, "".to_string())
+        };
+
+        let max_narrow_iters_message =
+            if let Some(max_narrow_iters) = self.refine_args.max_narrow_iters {
+                format!(", limiting to {max_narrow_iters} total sweeps")
+            } else {
+                "".to_string()
+            };
+        let search_config = if self.refine_args.skip_search {
+            info!("skipping exhaustive search for each modification code");
+            SearchConfig::FullSearch // doesn't really matter
+        } else {
+            match (
+                self.refine_args.search_top_pct,
+                self.refine_args.narrow_search,
+                self.refine_args.search_timeout,
+            ) {
+                (None, _, None) => {
+                    info!("performing full search for each modification code");
+                    SearchConfig::FullSearch
+                }
+                (Some(p), true, None) => {
+                    let frac = sanity_check_pct(p)?;
+                    info!(
+                        "using Batch and Narrow Optimization on {p}% of the \
+                         seeds at a \
+                         time{max_seeds_message}{max_narrow_iters_message}"
+                    );
+                    SearchConfig::BatchAndNarrow {
+                        frac,
+                        min_seeds: self.refine_args.min_exhaustive_seeds,
+                        max_seeds,
+                        max_iters: self.refine_args.max_narrow_iters,
+                    }
+                }
+                (Some(p), false, None) => {
+                    let frac = sanity_check_pct(p)?;
+                    info!(
+                        "in exhaustive search, only searching the top {p}% of \
+                         the seeds{max_seeds_message}"
+                    );
+                    SearchConfig::TopFrac {
+                        frac,
+                        min_seeds: self.refine_args.min_exhaustive_seeds,
+                        max_seeds,
+                    }
+                }
+                (Some(p), true, Some(timeout)) => {
+                    let frac = sanity_check_pct(p)?;
+                    info!(
+                        "using Batch and Narrow Optimization with timeout \
+                         ({}{max_narrow_iters_message}), on {p}% of the \
+                         seeds{max_seeds_message}",
+                        humantime::format_duration(timeout)
+                    );
+                    SearchConfig::TimeoutAndNarrow {
+                        frac,
+                        min_seeds: self.refine_args.min_exhaustive_seeds,
+                        total_time: timeout,
+                        max_seeds,
+                        max_iters: self.refine_args.max_narrow_iters,
+                    }
+                }
+                (None, false, Some(timeout)) => {
+                    info!(
+                        "setting time limit of {} on exhaustive search, \
+                         searching {} seeds at a time",
+                        humantime::format_duration(timeout),
+                        self.refine_args.search_batch_size
+                    );
+                    SearchConfig::Timeout {
+                        batch_size: self.refine_args.search_batch_size,
+                        total_time: timeout,
+                    }
+                }
+                _ => bail!("invalid options"),
+            }
+        };
 
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(self.input_args.threads)
@@ -245,13 +354,14 @@ impl EntryFindMotifs {
                     .par_iter()
                     .flat_map(|(mod_code, canonical_base)| {
                         find_motifs_for_mod(
+                            search_config,
                             *canonical_base,
                             *mod_code,
                             &mod_db,
                             &self.init_context_size,
-                            self.refine_args.min_log_odds,
-                            self.refine_args.min_sites,
-                            self.refine_args.frac_sites_thresh,
+                            self.motif_parameters.min_log_odds,
+                            self.motif_parameters.min_sites,
+                            self.motif_parameters.frac_sites_thresh,
                             self.refine_args.skip_search,
                             self.refine_args.exhaustive_seed_len,
                             self.refine_args.exhaustive_seed_min_log_odds,
@@ -272,8 +382,8 @@ impl EntryFindMotifs {
         {
             let mut motifs_to_score = Vec::new();
             let context_size = [
-                self.refine_args.context_size[0] as usize,
-                self.refine_args.context_size[1] as usize,
+                self.motif_parameters.context_size[0] as usize,
+                self.motif_parameters.context_size[1] as usize,
             ];
             let grouped_by_base =
                 results.iter().fold(HashMap::new(), |mut agg, next_motif| {
@@ -387,8 +497,8 @@ impl EntryFindMotifs {
         others: &HashMap<DnaBase, Vec<&EnrichedMotif>>,
     ) -> (String, String) {
         let context_size = [
-            self.refine_args.context_size[0] as usize,
-            self.refine_args.context_size[1] as usize,
+            self.motif_parameters.context_size[0] as usize,
+            self.motif_parameters.context_size[1] as usize,
         ];
         if let Some(motifs_for_base) = others.get(&motif.canonical_base) {
             motifs_for_base
@@ -631,6 +741,8 @@ pub struct EntryRefineMotifs {
     input_args: InputArgs,
     #[clap(flatten)]
     known_motifs_args: KnownMotifsArgs,
+    #[clap(flatten)]
+    motif_parameters: MotifParameters,
     /// Machine-parsable table of refined motifs. Human-readable table always
     /// printed to stderr and log.
     #[clap(help_heading = "Output Options")]
@@ -638,17 +750,13 @@ pub struct EntryRefineMotifs {
     out_table: Option<PathBuf>,
     /// Minimum fraction of sites in the genome to be "high-modification"
     /// for a motif to be further refined, otherwise it will be discarded.
-    #[clap(help_heading = "Refine Options")]
     #[arg(long = "min_refine_frac_mod", default_value_t = 0.6)]
     min_refine_frac_modified: f32,
     /// Minimum number of total sites in the genome required for a motif to be
     /// further refined, otherwise it will be discarded.
-    #[clap(help_heading = "Refine Options")]
     #[arg(long, default_value_t = 300)]
     #[arg(long)]
     pub min_refine_sites: u64,
-    #[clap(flatten)]
-    refine_args: RefineArgs,
     /// Force override SAM specification of association of modification codes
     /// to primary sequence bases.
     #[arg(long = "force-override-spec", default_value_t = false)]
@@ -701,6 +809,7 @@ impl EntryRefineMotifs {
                 .par_iter()
                 .progress_with(refine_pb)
                 .map(|motif| {
+                    // todo this could be lifted out
                     let kmer_subset = mod_db.get_kmer_subset(
                         motif.canonical_base,
                         &KmerMask::default(),
@@ -710,9 +819,10 @@ impl EntryRefineMotifs {
                         &mod_db,
                         &cache,
                         &kmer_subset,
-                        self.refine_args.min_sites,
-                        self.refine_args.frac_sites_thresh,
-                        self.refine_args.min_log_odds,
+                        self.motif_parameters.min_sites,
+                        self.motif_parameters.frac_sites_thresh,
+                        self.motif_parameters.min_log_odds,
+                        Stage::Seeded,
                     )
                 })
                 .collect::<Vec<EnrichedMotif>>()
@@ -748,17 +858,17 @@ impl EntryRefineMotifs {
             mpb.set_draw_target(indicatif::ProgressDrawTarget::hidden());
         }
         let context_bases = [
-            self.refine_args.context_size[0],
-            self.refine_args.context_size[1],
+            self.motif_parameters.context_size[0],
+            self.motif_parameters.context_size[1],
         ];
         let mod_db = load_bedmethyl_and_references(
             &self.input_args.reference_fasta,
             &self.input_args.in_bedmethyl,
             self.input_args.contig.clone(),
-            self.refine_args.min_coverage,
+            self.motif_parameters.min_coverage,
             context_bases,
-            self.refine_args.low_threshold,
-            self.refine_args.high_threshold,
+            self.motif_parameters.low_threshold,
+            self.motif_parameters.high_threshold,
             &mpb,
             self.input_args.io_threads,
             &pool,
@@ -785,7 +895,7 @@ impl EntryRefineMotifs {
                 .progress_with(score_pb)
                 .map(|motif| mod_db.get_enriched_motif_data(&motif))
                 .collect::<Vec<EnrichedMotifData>>()
-                .into_iter()
+                .into_iter() // todo what?!
                 .collect::<Vec<EnrichedMotifData>>()
         });
 
@@ -823,19 +933,23 @@ pub struct EntryEvaluateMotifs {
     /// to primary sequence bases.
     #[arg(long = "force-override-spec", default_value_t = false)]
     override_spec: bool,
-    /// Minimum coverage in the bedMethyl to consider a record valid.
+    /// Minimum valid coverage in the bedMethyl to consider a record valid.
+    #[clap(help_heading = "Search Options")]
     #[arg(long, default_value_t = 5)]
     min_coverage: u64,
     /// Upstream and downstream number of bases to search for a motif sequence
     /// around a modified base. Example: --context-size 12 12.
+    #[clap(help_heading = "Search Options")]
     #[arg(long, num_args=2, default_values_t=vec![12, 12])]
     context_size: Vec<u64>,
     /// Fraction modified threshold below which consider a genome location to
     /// be "low modification".
+    #[clap(help_heading = "Search Options")]
     #[arg(long = "low-thresh", default_value_t = 0.2)]
     low_threshold: f32,
     /// Fraction modified threshold above which consider a genome location to
     /// be "high modification" or enriched for modification.
+    #[clap(help_heading = "Search Options")]
     #[arg(long = "high-thresh", default_value_t = 0.6)]
     high_threshold: f32,
     /// Don't print final table to stderr (will still go to log file).

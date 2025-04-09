@@ -877,7 +877,7 @@ impl IupacBase {
 
 #[cfg(test)]
 mod iupac_tests {
-    use crate::find_motifs::iupac::IupacBase;
+    use crate::motifs::iupac::IupacBase;
 
     #[test]
     fn test_superset() {

@@ -18,6 +18,10 @@ modkit motif search \
 
 Specifying an output with `-o` will generate a machine-readable tab-separated-values file, a human-readable version of the table will always be logged to the terminal and the logfile.
 
+If you have compressed your bedMethyl table with `bgzip` you can use the compressed table as well.
+A compressed table with `tabix`-generated index is required to use the `--contig` option which will find motifs using only a single contig in the bedMethyl table. 
+This may be useful for applications such as metagenomics.
+
 ## Output format
 
 All output tables are output in two formats, machine-readable and human-readable.
@@ -113,9 +117,63 @@ The algorithm then iteratively expands, contracts, and merges sequences while th
 Once a motif sequence cannot be changed (made more general or more restrictive) without violating one of these criteria, the motif sequence is considered complete.
 As the algorithm continues, context sequences that match discovered sequences are removed from consideration.
 
-A secondary search step is also performed by starting with every k-mer (where k is less than the total sequence length, 3 by default, set with `--exhaustive-seed-len`) at every motif position.
+A secondary search step, called the "exhaustive search", is also performed by starting with every k-mer (where k is less than the total sequence length, 3 by default, set with `--exhaustive-seed-len`) at every motif position.
 The log-odds threshold for this search is usually higher and set with `--exhaustive-seed-min-log-odds`.
-Decreasing this value can drastically increase computational time.
+Decreasing this value can drastically increase computational time, see the next section for more details.
+
+## Options to decrease or limit search time.
+
+The optional (but recommended) exhaustive search step checks many sparsely defined sequences, called seeds, for enrichment as defined by `--exhaustive-seed-min-log-odds`.
+The algorithm then refines the seeds above the threshold into candidate motifs using the method described [previously](intro_find_motifs.md#simple-description-of-the-search-algorithm).
+An example seed is `GNNNNNNNNNNC[m]NNNNNNNNNNNA` using the modification code for 5mC.
+The number of seeds is defined by the `--context-size` and `--exhaustive-seed-length` parameters.
+For example, if `--context-size a b` is passed the seeds will be length \\( a + b + 1 \\).
+The default value is `a = 12`, `b = 12` so the sequence length is 25, but we only use 24 of those positions, call this \\( n \\).
+The default value for `--exhaustive-seed-length` is 3, call this \\( k \\).
+Remember that there are 4 primary sequence bases.
+So the number of seeds to search is \\( k^4 * \binom{n}{k} \\) or 129,536 seeds.
+Most of these seeds will fall below the log-odds required, and not follow-on to refinement.
+However, if a large number ( \\( \gt 500 \\) ) are above the log-odds threshold then this step can be very time consuming.
+There are a couple options that can decrease or limit this run time, whist usually affording identical or very good results.
+
+1. A simple timeout.
+  When the search starts, the top-N (as ranked by log-odds) seeds are taken.
+  The search is run on this "batch", if the timeout has not expired the next batch of N is taken.
+  If all of the seeds are not evaluated before running out of time, the results are returned but an ERROR message is displayed.
+
+```bash
+# specify that search should stop after 15 minutes
+$ modkit motif search ... --search-timeout 15m
+```
+
+2. Top percent.
+  Only search the top P-% of seeds (or a maximum number).
+  So a command like this `--search-top-pct 20 --max-exhaustive-seeds 200` would search the top 20% of seeds as ranked by their log-odds for being motifs or the top 200 seeds if 20% of all of the seeds passing `--exhaustive-seed-min-log-odds` is greater than 200.
+  **n.b.** With default settings, in the most pathological settings 129,536 could be searched.
+
+```bash
+# only search the min(top 20% of seeds, 100 seeds)
+$ modkit motif search ... --search-top-pct 20 --max-exhaustive-seeds 100
+```
+
+3. Batch and Narrow Optimization.
+  This algorithm is a combination of (1) and (2).
+  In this scenario, we take the top P-% of seeds (or the maximum allowed) as in (2).
+  But instead of stopping as in (2) we continue (as in (1)) but we remove contexts from consideration based on the motifs we've found before the next round.
+  At the end of the round, if zero motifs are found, we stop.
+
+```bash
+# same as (2), but continue to search after each batch
+$ modkit motif search .. --search-top-pct 20 --max-exhaustive-seeds 100 --narrow-search
+```
+
+4. Batch and Narrow Optimization with Timeout.
+  This scenario is the same as (3), but if we've run out of time at the end of a round - stop.
+
+```bash
+# same as (3), but continue to search after each batch, until we've spent 15 minutes searching.
+$ modkit motif search .. --search-top-pct 20 --max-exhaustive-seeds 100 --narrow-search --search-timeout 15m
+```
 
 ## Tuning parameters and `--skip-search`
 
@@ -126,3 +184,11 @@ Decreasing `--min-sites` along with `--skip-search` may be a useful technique to
 1. Increasing `--exhaustive-seed-min-log-odds` can drastically decrease compute time (sometimes while maintaining sensitivity).
 
 Also consider the additional steps in [performance considerations.](./perf_considerations.md#parallelism-in-find-motifs-when-to---skip-search)
+
+
+## Investigating how motifs are evaluated
+
+The `motif search` function uses JSON-lines structured logging that can be searched and queried for specific events.
+The schema and some examples are described [in another section](./motif_search_structured_logging.md).
+
+

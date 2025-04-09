@@ -7,9 +7,9 @@ use log::{debug, info, warn};
 use rust_htslib::bam::{self, Header};
 
 use crate::adjust::OverlappingRegexOffset;
-use crate::find_motifs::motif_bed::RegexMotif;
 use crate::mod_bam::{CollapseMethod, EdgeFilter};
 use crate::mod_base_code::{DnaBase, ModCodeRepr};
+use crate::motifs::motif_bed::RegexMotif;
 use crate::position_filter::StrandedPositionFilter;
 use crate::threshold_mod_caller::MultipleThresholdModCaller;
 use crate::thresholds::calc_threshold_from_bam;

@@ -6,13 +6,13 @@ use rust_htslib::bam;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::errs::{MkError, MkResult};
-use crate::find_motifs::motif_bed::MotifInfo;
 use crate::mod_bam::{
     BaseModCall, CollapseMethod, DuplexModCall, EdgeFilter, ModBaseInfo,
     SeqPosBaseModProbs, SkipMode,
 };
 use crate::mod_base_code::{DnaBase, ModCodeRepr};
 use crate::monoid::BorrowingMoniod;
+use crate::motifs::motif_bed::MotifInfo;
 use crate::threshold_mod_caller::MultipleThresholdModCaller;
 use crate::util::{self, Strand};
 

@@ -1,3 +1,7 @@
+use std::fs::File;
+use std::path::PathBuf;
+
+use anyhow::Context;
 use log::{debug, LevelFilter};
 use log4rs::append::console::{ConsoleAppender, Target};
 use log4rs::append::file::FileAppender;
@@ -5,7 +9,10 @@ use log4rs::config::{Appender, Root};
 use log4rs::encode::pattern::PatternEncoder;
 use log4rs::filter::threshold::ThresholdFilter;
 use log4rs::{Config, Handle};
-use std::path::PathBuf;
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::fmt::layer;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{layer::SubscriberExt, Layer};
 
 pub fn init_logging_smart(
     log_fp: Option<&PathBuf>,
@@ -23,8 +30,10 @@ pub fn init_logging_smart(
         .build();
 
     let config = if let Some(fp) = log_fp {
-        let logfile =
-            FileAppender::builder().encoder(file_endcoder).build(fp).unwrap();
+        let logfile = FileAppender::builder()
+            .encoder(file_endcoder)
+            .build(fp)
+            .expect("failed to make file logger");
         let mut config = Config::builder();
         let logfile_appender =
             Appender::builder().build("logfile", Box::new(logfile));
@@ -63,4 +72,40 @@ pub fn init_logging_smart(
 
 pub fn init_logging(log_fp: Option<&PathBuf>) -> Handle {
     init_logging_smart(log_fp, false)
+}
+
+pub fn init_tracing(
+    log_fp: Option<&PathBuf>,
+) -> anyhow::Result<Option<WorkerGuard>> {
+    let mut layers = Vec::new();
+    let stderr_layer = layer()
+        .compact()
+        .without_time()
+        .with_target(false)
+        .with_filter(tracing::level_filters::LevelFilter::INFO)
+        .boxed();
+    layers.push(stderr_layer);
+
+    let guard = if let Some(fp) = log_fp {
+        let log_fh =
+            File::create(fp).context("failed to create output file")?;
+        let (logfile_appender, guard) = tracing_appender::non_blocking(log_fh);
+
+        let file_layer = layer()
+            .json()
+            .with_target(true)
+            .with_line_number(true)
+            .with_file(true)
+            .with_writer(logfile_appender)
+            .with_filter(tracing::level_filters::LevelFilter::DEBUG)
+            .boxed();
+        layers.push(file_layer);
+        Some(guard)
+    } else {
+        None
+    };
+    tracing_subscriber::registry().with(layers).init();
+    let command_line = std::env::args().collect::<Vec<String>>().join(" ");
+    debug!("command line: {command_line}");
+    Ok(guard)
 }

@@ -12,20 +12,21 @@ use bitvec::prelude::*;
 use derive_new::new;
 use indicatif::{MultiProgress, ParallelProgressIterator, ProgressIterator};
 use itertools::{iproduct, Either, Itertools};
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use nom::character::complete::multispace1;
 use nom::IResult;
 use prettytable as pt;
 use prettytable::row;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
+use tracing::debug;
 
 use crate::dmr::bedmethyl::BedMethylLine;
 use crate::errs::MkError;
-use crate::find_motifs::args::KnownMotifsArgs;
-use crate::find_motifs::iupac::nt_bytes::BASES;
-use crate::find_motifs::iupac::IupacBase;
 use crate::mod_base_code::{DnaBase, ModCodeRepr, MOD_CODE_TO_DNA_BASE};
+use crate::motifs::args::KnownMotifsArgs;
+use crate::motifs::iupac::nt_bytes::BASES;
+use crate::motifs::iupac::IupacBase;
 use crate::parsing_utils::consume_string;
 use crate::util::{get_subroutine_progress_bar, get_ticker, StrandRule};
 
@@ -37,6 +38,69 @@ pub(super) mod util;
 
 type KmerRef<'a> = &'a [u8];
 type RawBase = u8;
+
+#[derive(Debug)]
+enum Action {
+    Found,
+    Refined,
+    Discard,
+}
+
+impl Display for Action {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let l = match self {
+            Action::Found => "found",
+            Action::Discard => "discard",
+            Action::Refined => "refined",
+        };
+        write!(f, "{l}")
+    }
+}
+
+#[derive(Debug)]
+enum Stage {
+    Seeded,
+    Seedless,
+    Search,
+}
+
+impl Display for Stage {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let l = match self {
+            Stage::Seeded => "seeded",
+            Stage::Seedless => "seedless",
+            Stage::Search => "search",
+        };
+        write!(f, "{l}")
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+enum SearchConfig {
+    FullSearch,
+    TopFrac {
+        frac: f32,
+        min_seeds: usize,
+        max_seeds: usize,
+    },
+    BatchAndNarrow {
+        frac: f32,
+        min_seeds: usize,
+        max_seeds: usize,
+        max_iters: Option<usize>,
+    },
+    TimeoutAndNarrow {
+        frac: f32,
+        min_seeds: usize,
+        max_seeds: usize,
+        total_time: std::time::Duration,
+        max_iters: Option<usize>,
+    },
+    Timeout {
+        batch_size: usize,
+        total_time: std::time::Duration,
+    },
+}
 
 fn get_interval(focus_position: usize, context: &[usize; 2]) -> Range<usize> {
     // todo should be a result and/or need wrap this into a ContextBase struct
@@ -137,8 +201,24 @@ impl MultiSequence {
             let matches = self
                 .seq
                 .iter()
-                .filter_map(|(x, a)| other.seq.get(x).map(|b| (a, b)))
-                .all(|(a, b)| a.is_superset(b));
+                .map(|(x, a)| {
+                    other
+                        .seq
+                        .get(x)
+                        .copied()
+                        .map(|b| (*a, b))
+                        .unwrap_or_else(|| (*a, IupacBase::N))
+                })
+                .all(|(a, b)| a.is_superset(&b));
+            // original implementation left here for reference.. In this case a
+            // motif such as GS[a]TC would be a superset of C[a]TG,
+            // but that's not exactly true so I changed to the above
+            // implementaton with no regression on H. pylori
+            // let matches = self
+            //     .seq
+            //     .iter()
+            //     .filter_map(|(x, a)| other.seq.get(x).map(|b| (a, b)))
+            //     .all(|(a, b)| a.is_superset(b));
             matches
         } else {
             false
@@ -420,6 +500,8 @@ impl<'a> KmerMask<'a> {
         self,
         motifs: &[EnrichedMotif],
         mod_db: &'a KmerModificationDb,
+        mod_code: ModCodeRepr,
+        stage: Stage,
     ) -> Either<Self, Self> {
         let prev_high = self.high_mod_mask;
         let prev_low = self.low_mod_mask;
@@ -446,8 +528,19 @@ impl<'a> KmerMask<'a> {
 
         let count_high_removed = new_high.len();
         let count_low_removed = new_low.len();
-        debug!("removing {} contexts from the high list", count_high_removed);
-        debug!("removing {} contexts from the low list", count_low_removed);
+        // todo could add mod_code and stage here..
+        debug!(
+            mod_code = mod_code.to_string(),
+            stage = stage.to_string(),
+            "removing {} contexts from the high list",
+            count_high_removed
+        );
+        debug!(
+            mod_code = mod_code.to_string(),
+            stage = stage.to_string(),
+            "removing {} contexts from the low list",
+            count_low_removed
+        );
         let high_mod_mask = prev_high
             .into_iter()
             .chain(new_high)
@@ -1124,7 +1217,9 @@ fn load_bedmethyl(
         Low,
     }
 
-    let file_fh = std::fs::File::open(bedmethyl_fp)?;
+    let file_fh = std::fs::File::open(bedmethyl_fp)
+        .context(format!("failed to open bedMethyl at {bedmethyl_fp:?}"))?;
+
     let tbx_reader = crate::tabix::HtsTabixHandler::<BedMethylLine>::from_path(
         &bedmethyl_fp,
     );
@@ -1895,6 +1990,7 @@ impl EnrichedMotif {
         min_sites: u64,
         frac_sites_thresh: f32,
         min_log_odds: f32,
+        stage: Stage,
     ) -> Self {
         let starting_pattern = self.to_string();
         let debug = false;
@@ -1917,8 +2013,13 @@ impl EnrichedMotif {
             motif = motif.add_bases_to_motif(&mod_db, cache, frac_sites_thresh);
             if motif == last_motif {
                 debug!(
-                    "no changes, finished refining {starting_pattern} into \
-                     {motif}, took {n_iters} iterations"
+                    from_motif = starting_pattern,
+                    motif = motif.to_string(),
+                    mod_code = motif.mod_code().to_string(),
+                    action = Action::Refined.to_string(),
+                    stage = stage.to_string(),
+                    "refined {starting_pattern} into {motif}, took {n_iters} \
+                     iterations",
                 );
                 break;
             } else {
@@ -1980,6 +2081,10 @@ impl EnrichedMotif {
             MotifRelationship::Disjoint { edit_distance }
         }
     }
+
+    pub(super) fn mod_code(&self) -> ModCodeRepr {
+        self.multi_sequence.mod_code
+    }
 }
 
 impl Display for EnrichedMotif {
@@ -2031,7 +2136,7 @@ fn merge_motifs(mut enriched_motifs: Vec<EnrichedMotif>) -> Vec<EnrichedMotif> {
         });
 
         if matches.iter().all(|(_, subsets)| subsets.is_empty()) {
-            debug!("no more merging to do");
+            // debug!("no more merging to do");
             break;
         }
 
@@ -2096,6 +2201,8 @@ fn get_fixed_length_motifs(
     } // otherwise join them up
 
     debug!(
+        mod_code = mod_code.to_string(),
+        stage = Stage::Seeded.to_string(),
         "there are {} enriched kmers for mod {mod_code}",
         enriched_kmers.len()
     );
@@ -2204,6 +2311,8 @@ fn get_seeded_motifs<'a>(
         .collect::<Vec<EnrichedMotif>>();
         if fixed_length_motifs.is_empty() {
             debug!(
+                mod_code = mod_code.to_string(),
+                stage = Stage::Seeded.to_string(),
                 "zero fixed length motifs, finished in {} iterations",
                 seed_pb.position()
             );
@@ -2220,6 +2329,7 @@ fn get_seeded_motifs<'a>(
                     min_sites,
                     frac_sites_thresh,
                     min_log_odds,
+                    Stage::Seeded,
                 )
             })
             .collect::<FxHashSet<EnrichedMotif>>();
@@ -2232,37 +2342,59 @@ fn get_seeded_motifs<'a>(
                     mod_db.get_mod_counts(refined_motif, &KmerMask::default());
                 let frac_high =
                     high_count as f32 / (high_count + low_count) as f32;
-                // todo go back and simplify once I know that I don't want this
-                // kind of verbosity
                 if high_count < min_sites {
                     debug!(
+                        action = Action::Discard.to_string(),
+                        motif = refined_motif.to_string(),
+                        mod_code = refined_motif.mod_code().to_string(),
+                        stage = Stage::Seeded.to_string(),
+                        require = min_sites,
+                        value = high_count,
                         "discarding {refined_motif}, high-modified sites too \
-                         low, {high_count}"
+                         low, {high_count} requires {min_sites}"
                     );
                     false
                 } else if frac_high <= frac_sites_thresh {
                     debug!(
+                        action = Action::Discard.to_string(),
+                        motif = refined_motif.to_string(),
+                        mod_code = refined_motif.mod_code().to_string(),
+                        stage = Stage::Seeded.to_string(),
+                        require = frac_sites_thresh,
+                        value = frac_high,
                         "discarding {refined_motif}, fraction modified too \
-                         low, {frac_high}"
+                         low, {frac_high}, requires {frac_sites_thresh}"
                     );
                     false
                 } else {
+                    debug!(
+                        action = Action::Found.to_string(),
+                        motif = refined_motif.to_string(),
+                        mod_code = refined_motif.mod_code().to_string(),
+                        stage = Stage::Seeded.to_string(),
+                        "keeping refined motif {refined_motif}, it has \
+                         {high_count} sites and {frac_high}% high"
+                    );
                     true
                 }
             })
             .filter(|refined_motif| {
                 match mod_motifs
                     .iter()
-                    .any(|mot| refined_motif.is_superset(mot))
+                    .find(|mot| refined_motif.is_superset(mot))
                 {
-                    true => {
+                    Some(mot) => {
                         debug!(
+                            action = Action::Discard.to_string(),
+                            motif = refined_motif.to_string(),
+                            mod_code = refined_motif.mod_code().to_string(),
+                            stage = Stage::Seeded.to_string(),
                             "discarding {refined_motif} as a superset of or \
-                             equivalent to a previously found motif"
+                             equivalent to a previously found motif, {mot}"
                         );
                         false
                     }
-                    false => true, // keep it
+                    None => true, // keep it
                 }
             })
             .collect::<Vec<EnrichedMotif>>();
@@ -2276,14 +2408,27 @@ fn get_seeded_motifs<'a>(
         }
 
         // remove the contexts from these motifs
-        let new_mask =
-            match kmer_mask.update_with_check(&refined_motifs, mod_db) {
-                Either::Left(_) => {
-                    info!("should always remove contexts in this loop?");
-                    unreachable!("should always remove contexts in this loop?")
-                }
-                Either::Right(new_mask) => new_mask,
-            };
+        let new_mask = match kmer_mask.update_with_check(
+            &refined_motifs,
+            mod_db,
+            mod_code,
+            Stage::Seeded,
+        ) {
+            Either::Left(new_mask) => {
+                mod_motifs.append(&mut refined_motifs);
+                mod_motifs = merge_motifs(mod_motifs);
+                debug!(
+                    stage = Stage::Seeded.to_string(),
+                    mod_code = mod_code.to_string(),
+                    "should always remove contexts, finishing seeded search \
+                     after {} iterations",
+                    seed_pb.position()
+                );
+                kmer_mask = new_mask;
+                break;
+            }
+            Either::Right(new_mask) => new_mask,
+        };
 
         mod_motifs.append(&mut refined_motifs);
         mod_motifs = merge_motifs(mod_motifs);
@@ -2294,6 +2439,8 @@ fn get_seeded_motifs<'a>(
             mod_db.count_low_mod_contexts(&mod_code, &new_mask);
 
         debug!(
+            stage = Stage::Seeded.to_string(),
+            mod_code = mod_code.to_string(),
             "at iter {} there are {n_high_contexts} remaining high contexts \
              and {n_low_contexts} remaining low contexts",
             seed_pb.position()
@@ -2309,6 +2456,7 @@ fn get_seeded_motifs<'a>(
 }
 
 fn find_motifs_for_mod(
+    search_config: SearchConfig,
     canonical_base: DnaBase,
     mod_code: ModCodeRepr,
     mod_db: &KmerModificationDb,
@@ -2322,15 +2470,16 @@ fn find_motifs_for_mod(
     multi_progress: &MultiProgress,
 ) -> Vec<EnrichedMotifData> {
     let cache = RwLock::new(FxHashMap::<String, (f32, u64)>::default());
-
     let n_high_contexts =
         mod_db.count_high_mod_contexts(&mod_code, &KmerMask::default());
     let n_low_contexts =
         mod_db.count_low_mod_contexts(&mod_code, &KmerMask::default());
+
     debug!(
-        "at start for mod {mod_code} there are {} high contexts and {} low \
-         contexts",
-        n_high_contexts, n_low_contexts
+        mod_code = mod_code.to_string(),
+        "At start, there are {} high contexts and {} low contexts",
+        n_high_contexts,
+        n_low_contexts
     );
 
     let start = std::time::Instant::now();
@@ -2347,6 +2496,8 @@ fn find_motifs_for_mod(
     );
     let took = start.elapsed();
     debug!(
+        mod_code = mod_code.to_string(),
+        stage = Stage::Seeded.to_string(),
         "{}",
         util::log_motifs(mod_code, &seeded_motifs, "seeded motifs", took)
     );
@@ -2365,19 +2516,33 @@ fn find_motifs_for_mod(
             min_sites,
             frac_sites_thresh,
             min_log_odds,
+            Stage::Seedless,
         );
         let (high_count, low_count) =
             mod_db.get_mod_counts(&motif, &KmerMask::default());
         let frac_high = high_count as f32 / (high_count + low_count) as f32;
         if high_count >= min_sites && frac_high > frac_sites_thresh {
-            debug!("({mod_code}) found seedless motif {motif}, saving");
+            debug!(
+                mod_code = mod_code.to_string(),
+                stage = Stage::Seedless.to_string(),
+                motif = motif.to_string(),
+                action = Action::Found.to_string(),
+                "({mod_code}) found motif {motif} in seedless stage"
+            );
             seeded_motifs.push(motif);
             seeded_motifs = merge_motifs(seeded_motifs);
             debug!(
+                mod_code = mod_code.to_string(),
+                stage = Stage::Seedless.to_string(),
                 "({mod_code}) seeded motifs is now {}",
                 seeded_motifs.iter().map(|m| m.to_string()).join(",")
             );
-            match kmer_mask.update_with_check(&seeded_motifs, &mod_db) {
+            match kmer_mask.update_with_check(
+                &seeded_motifs,
+                &mod_db,
+                mod_code,
+                Stage::Seedless,
+            ) {
                 Either::Left(new_mask) => {
                     debug!(
                         "({mod_code}) done searching for seedless motifs, \
@@ -2399,7 +2564,33 @@ fn find_motifs_for_mod(
                 }
             }
         } else {
+            if high_count < min_sites {
+                debug!(
+                    action = Action::Discard.to_string(),
+                    motif = motif.to_string(),
+                    mod_code = motif.mod_code().to_string(),
+                    stage = Stage::Seedless.to_string(),
+                    require = min_sites,
+                    value = high_count,
+                    "discarding {motif}, high-modified sites too low, \
+                     {high_count} requires {min_sites}"
+                );
+            }
+            if frac_high <= frac_sites_thresh {
+                debug!(
+                    action = Action::Discard.to_string(),
+                    motif = motif.to_string(),
+                    mod_code = motif.mod_code().to_string(),
+                    stage = Stage::Seedless.to_string(),
+                    require = frac_sites_thresh,
+                    value = frac_high,
+                    "discarding {motif}, fraction modified too low, \
+                     {frac_high}, requires {frac_sites_thresh}"
+                );
+            }
             debug!(
+                mod_code = mod_code.to_string(),
+                stage = Stage::Seedless.to_string(),
                 "({mod_code}) done searching for seedless motifs, found {}",
                 seedless_pb.position()
             );
@@ -2409,9 +2600,14 @@ fn find_motifs_for_mod(
     seedless_pb.finish_and_clear();
 
     let final_motifs = if !skip_search {
-        debug!("performing search");
+        debug!(
+            mod_code = mod_code.to_string(),
+            stage = Stage::Search.to_string(),
+            "performing search"
+        );
         let start = std::time::Instant::now();
         let exhaustive_seed_motifs = find_exhaustive_seed_motifs(
+            search_config,
             canonical_base,
             mod_code,
             exhaustive_search_kmer_size,
@@ -2421,12 +2617,20 @@ fn find_motifs_for_mod(
             frac_sites_thresh,
             mod_db,
             &cache,
-            &kmer_mask,
+            kmer_mask,
             multi_progress,
         );
         let end = start.elapsed();
 
+        let (exhaustive_seed_motifs, stopped_early) =
+            match exhaustive_seed_motifs {
+                Ok(x) => (x, false),
+                Err(x) => (x, true),
+            };
+
         debug!(
+            mod_code = mod_code.to_string(),
+            stage = Stage::Search.to_string(),
             "{}",
             util::log_motifs(
                 mod_code,
@@ -2436,19 +2640,38 @@ fn find_motifs_for_mod(
             )
         );
 
+        if stopped_early {
+            multi_progress.suspend(|| {
+                error!("stopped early without finishing search for {mod_code}")
+            })
+        };
+
         let exhaustive_seed_filt = exhaustive_seed_motifs
             .into_iter()
             .filter(|motif| {
-                let is_subset = seeded_motifs
+                let subset_of_motifs = seeded_motifs
                     .iter()
-                    .any(|seeded_mot| motif.is_subset(seeded_mot));
-                if is_subset {
+                    .find(|seeded_mot| motif.is_subset(seeded_mot));
+                if let Some(mot) = subset_of_motifs {
                     debug!(
+                        action = Action::Discard.to_string(),
+                        motif = motif.to_string(),
+                        mod_code = motif.mod_code().to_string(),
+                        stage = Stage::Search.to_string(),
                         "discarding {motif} as subset of previously found \
-                         motif"
+                         motif {mot}"
                     );
+                    false
+                } else {
+                    debug!(
+                        action = Action::Found.to_string(),
+                        motif = motif.to_string(),
+                        mod_code = motif.mod_code().to_string(),
+                        stage = Stage::Search.to_string(),
+                        "non-redundant motif from search {motif}"
+                    );
+                    true
                 }
-                !is_subset
             })
             .collect::<Vec<EnrichedMotif>>();
         merge_motifs(
@@ -2461,7 +2684,7 @@ fn find_motifs_for_mod(
         .map(|motif| mod_db.get_enriched_motif_data(&motif))
         .collect::<Vec<EnrichedMotifData>>()
     } else {
-        debug!("skipping search");
+        debug!(mod_code = mod_code.to_string(), "skipping search");
         seeded_motifs
             .into_par_iter()
             .map(|motif| mod_db.get_enriched_motif_data(&motif))
@@ -2471,7 +2694,8 @@ fn find_motifs_for_mod(
     final_motifs
 }
 
-fn find_exhaustive_seed_motifs(
+fn find_exhaustive_seed_motifs<'a>(
+    optim_config: SearchConfig,
     canonical_base: DnaBase,
     mod_code: ModCodeRepr,
     kmer_length: usize,
@@ -2479,15 +2703,12 @@ fn find_exhaustive_seed_motifs(
     refine_log_odds: f32,
     refine_min_sites: u64,
     refine_sites_thresh: f32,
-    mod_db: &KmerModificationDb,
+    mod_db: &'a KmerModificationDb,
     cache: &RwLock<FxHashMap<String, (f32, u64)>>,
-    kmer_mask: &KmerMask,
+    mut kmer_mask: KmerMask<'a>,
     multi_progress: &MultiProgress,
-) -> Vec<EnrichedMotif> {
-    let kmer_subset =
-        mod_db.get_kmer_subset(canonical_base, &kmer_mask, mod_code);
-    let position_bools =
-        kmer_subset.get_position_bools(mod_db.focus_position());
+) -> Result<Vec<EnrichedMotif>, Vec<EnrichedMotif>> {
+    let start_time = std::time::Instant::now();
     let kmers =
         itertools::repeat_n(BASES, kmer_length).multi_cartesian_product();
     let positions = (0usize
@@ -2496,66 +2717,382 @@ fn find_exhaustive_seed_motifs(
     let position_mers = positions.combinations(kmer_length);
     let combs = iproduct!(kmers, position_mers).collect::<Vec<_>>();
 
-    let pb = multi_progress.add(get_subroutine_progress_bar(combs.len()));
-    pb.set_message(format!("({mod_code}) seeds searched"));
+    let mut kmer_subset =
+        mod_db.get_kmer_subset(canonical_base, &kmer_mask, mod_code);
+    let mut position_bools =
+        kmer_subset.get_position_bools(mod_db.focus_position());
 
-    combs
-        .into_par_iter()
-        .progress_with(pb)
-        .filter(|(kmer, positions)| {
-            position_bools
+    let n_combs = combs.len();
+    let get_scoring_pb = || {
+        let pb = multi_progress.add(get_subroutine_progress_bar(n_combs));
+        pb.set_message(format!("({mod_code}) scoring seeds"));
+        pb
+    };
+
+    let mut kmer_positions = combs
+        .par_iter()
+        .progress_with(get_scoring_pb())
+        .filter_map(|(kmer, positions)| {
+            let lo = position_bools
                 .get_counts(kmer.as_slice(), positions.as_slice())
-                .log_odds()
-                >= search_min_log_odds
-        })
-        .map(|(kmer, positions)| {
-            assert_eq!(kmer.len(), positions.len());
-            let seq = positions
-                .into_iter()
-                .zip(kmer.into_iter())
-                .map(|(pos, raw_base)| {
-                    let offset = pos as i8 - mod_db.focus_position() as i8;
-                    (offset, IupacBase::from_base_unchecked(raw_base))
-                })
-                .collect::<BTreeMap<i8, IupacBase>>();
-            let multi_sequence = MultiSequence::new(mod_code, seq);
-            EnrichedMotif::new(canonical_base, multi_sequence)
-        })
-        .map(|motif| {
-            motif.refine(
-                mod_db,
-                cache,
-                &kmer_subset,
-                refine_min_sites,
-                refine_sites_thresh,
-                refine_log_odds,
-            )
-        })
-        .filter(|refined_motif| {
-            let (high_count, low_count) =
-                mod_db.get_mod_counts(refined_motif, &KmerMask::default());
-            let frac_high = high_count as f32 / (high_count + low_count) as f32;
-            // todo go back and simplify once I know that I don't want this
-            // kind of verbosity
-            if high_count < refine_min_sites {
-                debug!(
-                    "discarding {refined_motif} (search), high-modified sites \
-                     too low, {high_count}"
-                );
-                false
-            } else if frac_high <= refine_sites_thresh {
-                debug!(
-                    "discarding {refined_motif} (search), fraction modified \
-                     too low, {frac_high}"
-                );
-                false
+                .log_odds();
+            if lo >= search_min_log_odds {
+                Some((kmer, positions, lo))
             } else {
-                true
+                None
             }
         })
-        .collect::<FxHashSet<_>>()
+        .collect::<Vec<_>>()
         .into_iter()
-        .collect::<Vec<EnrichedMotif>>()
+        .sorted_by(|(_, _, a), (_, _, b)| {
+            a.partial_cmp(b).unwrap_or(Ordering::Equal)
+        })
+        .collect::<Vec<_>>();
+
+    // if !kmer_positions.is_empty() {
+    //     let log_oddss =
+    //         kmer_positions.iter().map(|(_, _, lo)|
+    // *lo).collect::<Vec<f32>>();     multi_progress.suspend(|| {
+    //         debug!(
+    //         mod_code = mod_code.to_string(),
+    //         stage = Stage::Search.to_string(),
+    //         log_odds = ?log_oddss,
+    //         );
+    //     });
+    // };
+
+    let mut n_iter = 1usize;
+    let mut results = Vec::new();
+    'search_loop: loop {
+        if kmer_positions.is_empty() {
+            debug!(
+                mod_code = mod_code.to_string(),
+                stage = Stage::Search.to_string(),
+                "zero seeds to search"
+            );
+            break;
+        }
+        multi_progress.suspend(|| {
+            debug!(
+                mod_code = mod_code.to_string(),
+                stage = Stage::Search.to_string(),
+                "there are {} total seeds to search at {n_iter}",
+                kmer_positions.len()
+            );
+            info!(
+                "there are {} seeds to search at {n_iter} for {mod_code}",
+                kmer_positions.len()
+            );
+        });
+
+        let search_batch = match optim_config {
+            SearchConfig::FullSearch => kmer_positions.split_off(0),
+            SearchConfig::TopFrac { frac, min_seeds, max_seeds }
+            | SearchConfig::BatchAndNarrow {
+                frac, min_seeds, max_seeds, ..
+            }
+            | SearchConfig::TimeoutAndNarrow {
+                frac,
+                min_seeds,
+                max_seeds,
+                ..
+            } => {
+                let head_n =
+                    (kmer_positions.len() as f32 * frac).ceil() as usize;
+                let head_n = std::cmp::min(max_seeds, head_n);
+                let head_n = std::cmp::max(head_n, min_seeds);
+                if head_n >= kmer_positions.len() {
+                    kmer_positions.split_off(0)
+                } else {
+                    kmer_positions.split_off(kmer_positions.len() - head_n)
+                }
+            }
+            SearchConfig::Timeout { batch_size, .. } => {
+                if batch_size >= kmer_positions.len() {
+                    kmer_positions.split_off(0)
+                } else {
+                    kmer_positions.split_off(kmer_positions.len() - batch_size)
+                }
+            }
+        };
+
+        let pb =
+            multi_progress.add(get_subroutine_progress_bar(search_batch.len()));
+        pb.set_message(format!("({mod_code}, {n_iter}) seeds searched"));
+        debug!(
+            mod_code = mod_code.to_string(),
+            stage = Stage::Search.to_string(),
+            "there are {} seeds in batch to search at {n_iter}",
+            search_batch.len()
+        );
+
+        let enriched_motifs = search_batch
+            .into_par_iter()
+            .progress_with(pb)
+            .filter(|(kmer, positions, _)| {
+                position_bools
+                    .get_counts(kmer.as_slice(), positions.as_slice())
+                    .log_odds()
+                    >= search_min_log_odds
+            })
+            .map(|(kmer, positions, _)| {
+                assert_eq!(kmer.len(), positions.len());
+                let seq = positions
+                    .into_iter()
+                    .zip(kmer.into_iter())
+                    .map(|(pos, raw_base)| {
+                        let offset = *pos as i8 - mod_db.focus_position() as i8;
+                        (offset, IupacBase::from_base_unchecked(*raw_base))
+                    })
+                    .collect::<BTreeMap<i8, IupacBase>>();
+                let multi_sequence = MultiSequence::new(mod_code, seq);
+                EnrichedMotif::new(canonical_base, multi_sequence)
+            })
+            .map(|motif| {
+                motif.refine(
+                    mod_db,
+                    cache,
+                    &kmer_subset,
+                    refine_min_sites,
+                    refine_sites_thresh,
+                    refine_log_odds,
+                    Stage::Search,
+                )
+            })
+            .filter(|refined_motif| {
+                let (high_count, low_count) =
+                    mod_db.get_mod_counts(refined_motif, &KmerMask::default());
+                let frac_high =
+                    high_count as f32 / (high_count + low_count) as f32;
+                if high_count < refine_min_sites {
+                    debug!(
+                        action = Action::Discard.to_string(),
+                        motif = refined_motif.to_string(),
+                        mod_code = refined_motif.mod_code().to_string(),
+                        stage = Stage::Search.to_string(),
+                        require = refine_min_sites,
+                        value = high_count,
+                        "discarding {refined_motif}, high-modified sites too \
+                         low, {high_count} requires {refine_min_sites}"
+                    );
+                    false
+                } else if frac_high <= refine_sites_thresh {
+                    debug!(
+                        action = Action::Discard.to_string(),
+                        motif = refined_motif.to_string(),
+                        mod_code = refined_motif.mod_code().to_string(),
+                        stage = Stage::Search.to_string(),
+                        require = refine_sites_thresh,
+                        value = frac_high,
+                        "discarding {refined_motif}, fraction modified too \
+                         low, {frac_high}, requires {refine_sites_thresh}"
+                    );
+                    false
+                } else {
+                    debug!(
+                        action = Action::Found.to_string(),
+                        motif = refined_motif.to_string(),
+                        mod_code = refined_motif.mod_code().to_string(),
+                        stage = Stage::Search.to_string(),
+                        "found {refined_motif} during search"
+                    );
+                    true
+                }
+            })
+            .collect::<FxHashSet<_>>()
+            .into_iter()
+            .collect::<Vec<EnrichedMotif>>();
+        debug!(
+            mod_code = mod_code.to_string(),
+            stage = Stage::Search.to_string(),
+            "found {} enriched motifs at iteration {}",
+            enriched_motifs.len(),
+            n_iter
+        );
+        match optim_config {
+            // first stopping condition, we're only doing one loop
+            SearchConfig::FullSearch | SearchConfig::TopFrac { .. } => {
+                assert!(results.is_empty());
+                return Ok(enriched_motifs);
+            }
+            SearchConfig::Timeout { total_time, .. } => {
+                let so_far =
+                    std::time::Instant::now().duration_since(start_time);
+                if so_far >= total_time {
+                    multi_progress.suspend(|| {
+                        warn!(
+                            "stopping search after {}",
+                            humantime::format_duration(so_far)
+                        )
+                    });
+                    results.extend(enriched_motifs.into_iter());
+                    return if kmer_positions.is_empty() {
+                        Ok(results)
+                    } else {
+                        Err(results)
+                    };
+                } else {
+                    let time_left = total_time - so_far;
+                    debug!(
+                        mod_code = mod_code.to_string(),
+                        stage = Stage::Search.to_string(),
+                        "exhaustive search has found {} motifs, have {} \
+                         remaining time",
+                        results.len(),
+                        humantime::format_duration(time_left)
+                    );
+                    n_iter += 1;
+                    continue 'search_loop;
+                }
+            }
+            _ => {}
+        }
+        // update
+        kmer_mask = match kmer_mask.update_with_check(
+            &enriched_motifs,
+            mod_db,
+            mod_code,
+            Stage::Search,
+        ) {
+            // second stopping condition, we haven't updated the mask
+            Either::Left(_new_mask) => {
+                results.extend(enriched_motifs.into_iter());
+                let so_far =
+                    std::time::Instant::now().duration_since(start_time);
+                multi_progress.suspend(|| {
+                    info!(
+                        "({mod_code}) didn't remove any contexts, after \
+                         {n_iter} iteration(s) stopping, found {} candidate \
+                         motifs, took {}",
+                        results.len(),
+                        humantime::format_duration(so_far)
+                    );
+                });
+                debug!(
+                    mod_code = mod_code.to_string(),
+                    stage = Stage::Search.to_string(),
+                    "didn't remove any contexts, stopping, found {} motifs, \
+                     took {}",
+                    results.len(),
+                    humantime::format_duration(so_far)
+                );
+                return Ok(results);
+            }
+            Either::Right(new_mask) => new_mask,
+        };
+        kmer_subset =
+            mod_db.get_kmer_subset(canonical_base, &kmer_mask, mod_code);
+        position_bools =
+            kmer_subset.get_position_bools(mod_db.focus_position());
+        let pb = get_scoring_pb();
+        kmer_positions = combs
+            .par_iter()
+            .progress_with(pb)
+            .filter_map(|(kmer, positions)| {
+                let lo = position_bools
+                    .get_counts(kmer.as_slice(), positions.as_slice())
+                    .log_odds();
+                if lo >= search_min_log_odds {
+                    Some((kmer, positions, lo))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .sorted_by(|(_, _, a), (_, _, b)| {
+                a.partial_cmp(b).unwrap_or(Ordering::Equal)
+            })
+            .collect::<Vec<_>>();
+
+        results.extend(enriched_motifs.into_iter());
+        match optim_config {
+            SearchConfig::TimeoutAndNarrow {
+                max_iters, total_time, ..
+            } => {
+                let so_far =
+                    std::time::Instant::now().duration_since(start_time);
+                if so_far >= total_time {
+                    multi_progress.suspend(|| {
+                        warn!(
+                            "({mod_code}) stopping search after {}",
+                            humantime::format_duration(so_far)
+                        )
+                    });
+                    return if kmer_positions.is_empty() {
+                        debug!(
+                            mod_code = mod_code.to_string(),
+                            stage = Stage::Search.to_string(),
+                            "zero seeds to search at timeout"
+                        );
+                        Ok(results)
+                    } else {
+                        debug!(
+                            mod_code = mod_code.to_string(),
+                            stage = Stage::Search.to_string(),
+                            "timed out when {} seeds to search on the next \
+                             round",
+                            kmer_positions.len()
+                        );
+                        Err(results)
+                    };
+                } else if max_iters.map(|i| n_iter >= i).unwrap_or(false) {
+                    return if kmer_positions.is_empty() {
+                        debug!(
+                            mod_code = mod_code.to_string(),
+                            stage = Stage::Search.to_string(),
+                            "max iterations reached, zero seeds remaining",
+                        );
+                        Ok(results)
+                    } else {
+                        debug!(
+                            mod_code = mod_code.to_string(),
+                            stage = Stage::Search.to_string(),
+                            "max iterations reached, {} seeds remaining",
+                            kmer_positions.len()
+                        );
+                        Err(results)
+                    };
+                } else {
+                    let time_left = total_time - so_far;
+                    debug!(
+                        mod_code = mod_code.to_string(),
+                        stage = Stage::Search.to_string(),
+                        "Batch and Narrow has found {} motifs, have {} \
+                         remaining time",
+                        results.len(),
+                        humantime::format_duration(time_left)
+                    );
+                }
+            }
+            SearchConfig::BatchAndNarrow { max_iters, .. } => {
+                if max_iters.map(|i| n_iter >= i).unwrap_or(false) {
+                    return if kmer_positions.is_empty() {
+                        debug!(
+                            mod_code = mod_code.to_string(),
+                            stage = Stage::Search.to_string(),
+                            "max iterations reached, zero seeds remaining"
+                        );
+                        Ok(results)
+                    } else {
+                        debug!(
+                            mod_code = mod_code.to_string(),
+                            stage = Stage::Search.to_string(),
+                            "max iterations reached, {} seeds remaining",
+                            kmer_positions.len()
+                        );
+                        Err(results)
+                    };
+                }
+            }
+            SearchConfig::Timeout { .. }
+            | SearchConfig::TopFrac { .. }
+            | SearchConfig::FullSearch => unreachable!(),
+        }
+        n_iter += 1;
+    }
+
+    Ok(results)
 }
 
 fn parse_known_motifs(
@@ -2650,13 +3187,13 @@ fn make_tables(motifs: &[EnrichedMotifData]) -> (pt::Table, pt::Table) {
 mod find_motifs_mod_tests {
     use std::collections::BTreeMap;
 
-    use bitvec::prelude::*;
-
-    use crate::find_motifs::iupac::IupacBase;
-    use crate::find_motifs::{
+    use crate::mod_base_code::{DnaBase, ModCodeRepr, SIX_METHYL_ADENINE};
+    use crate::motifs::iupac::IupacBase;
+    use crate::motifs::{
         merge_motifs, EnrichedMotif, MotifRelationship, MultiSequence,
     };
-    use crate::mod_base_code::{DnaBase, ModCodeRepr};
+    use bitvec::prelude::*;
+    use common_macros::hash_map;
 
     fn make_enriched_motif(
         m: &[(i8, IupacBase)],
@@ -2715,7 +3252,7 @@ mod find_motifs_mod_tests {
 
     #[test]
     fn test_contains_base() {
-        use crate::find_motifs::iupac::nt_bytes;
+        use crate::motifs::iupac::nt_bytes;
         let seq = [(1i8, IupacBase::S), (2i8, IupacBase::G)]
             .into_iter()
             .collect::<BTreeMap<_, _>>();
@@ -2919,9 +3456,47 @@ mod find_motifs_mod_tests {
             let ms = MultiSequence::new(ModCodeRepr::Code('a'), mp);
             EnrichedMotif::new(DnaBase::C, ms)
         };
-        println!("{a}");
-        println!("{b}");
-        dbg!(a.compare(&b, [4, 4]));
-        dbg!(b.compare(&a, [4, 4]));
+        assert_eq!(
+            a.compare(&b, [4, 4]),
+            MotifRelationship::Disjoint { edit_distance: 4 }
+        );
+        assert_eq!(
+            b.compare(&a, [4, 4]),
+            MotifRelationship::Disjoint { edit_distance: 4 }
+        );
+    }
+
+    #[test]
+    fn test_motif_subset_gh() {
+        let codelookup = hash_map!(
+            SIX_METHYL_ADENINE => DnaBase::A
+        );
+        let a = EnrichedMotif::new_from_parts(
+            "GSATC",
+            "a",
+            "2",
+            [12, 12],
+            &codelookup,
+        )
+        .unwrap();
+        let b = EnrichedMotif::new_from_parts(
+            "GATC",
+            "a",
+            "1",
+            [12, 12],
+            &codelookup,
+        )
+        .unwrap();
+        // dbg!(a.is_superset(&b));
+        // dbg!(b.is_subset(&a));
+        assert_eq!(
+            a.compare(&b, [12, 12]),
+            MotifRelationship::Disjoint { edit_distance: 2 }
+        );
+        // let x = vec![a, b];
+        // dbg!(x.iter().map(|x| x.to_string()).collect::<Vec<String>>());
+        // let x_merged = merge_motifs(x);
+        // dbg!(x_merged.iter().map(|x|
+        // x.to_string()).collect::<Vec<String>>());
     }
 }

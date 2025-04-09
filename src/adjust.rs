@@ -8,13 +8,13 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::ops::AddAssign;
 
 use crate::errs::{MkError, MkResult};
-use crate::find_motifs::motif_bed::OverlappingRegex;
 use crate::mod_bam::{
     format_mm_ml_tag, BaseModProbs, CollapseMethod, EdgeFilter, ModBaseInfo,
     SeqPosBaseModProbs,
 };
 use crate::mod_base_code::DnaBase;
 use crate::monoid::Moniod;
+use crate::motifs::motif_bed::OverlappingRegex;
 use crate::threshold_mod_caller::MultipleThresholdModCaller;
 use crate::util::{format_errors_table, get_query_name_string, get_ticker};
 
@@ -319,7 +319,7 @@ mod adjust_tests {
     use rust_htslib::bam::{self, Read};
 
     use crate::{
-        find_motifs::motif_bed::RegexMotif,
+        motifs::motif_bed::RegexMotif,
         read_ids_to_base_mod_probs::ReadBaseModProfile,
     };
 

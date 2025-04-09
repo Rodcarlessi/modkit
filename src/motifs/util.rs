@@ -1,9 +1,9 @@
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
-use crate::find_motifs::{EnrichedMotif, KmerRef, RawBase};
 use crate::mod_base_code::ModCodeRepr;
 use crate::monoid::Moniod;
+use crate::motifs::{EnrichedMotif, KmerRef, RawBase};
 
 #[inline]
 pub(super) fn aggregate_base_counts_on_position(
@@ -60,8 +60,8 @@ pub(super) fn log_motifs(
 ) -> String {
     if motifs.is_empty() {
         format!(
-            "({mod_code}) {kind} didn't find any motifs, took {}ms",
-            duration.as_millis()
+            "({mod_code}) {kind} didn't find any motifs, took {}",
+            humantime::format_duration(duration)
         )
     } else {
         let mut message = format!(

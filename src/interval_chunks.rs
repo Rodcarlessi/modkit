@@ -7,7 +7,7 @@ use log::debug;
 use rustc_hash::FxHashMap;
 
 use crate::fasta::MotifLocationsLookup;
-use crate::find_motifs::motif_bed::{
+use crate::motifs::motif_bed::{
     MotifInfo, MotifLocations, MultipleMotifLocations,
 };
 use crate::position_filter::{GenomeIntervals, Iv, StrandedPositionFilter};
