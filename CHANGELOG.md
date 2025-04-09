@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.4]
+### Adds
+- [extract] Adds alignment start and end columns
+- [extract] Adds motif annotation column
+- [localize] Allow BED4 input regions
+- [dmr] Improve logging and error reporting, adds `--careful` to output table of contigs that can be processed.
+- [dmr] Adds Cohen's h statistic
+- [motif, search] Adds "batch and narrow" exhaustive search algorithm
+- [motif, search] Adds structured logging
+### Changes
+- [all] Any output that is BED-like will have headers with "#" comment symbol
+### Fixes
+- [all] Correctly parse "transcript"-like contigs for `--region` arguments
+- [dmr] Correctly handle bedMethyl tables with multiple motifs in the `name` column
+
+
 ## [v0.4.4-rc1]
 ### Fixes
 - [bedmethyl, merge] Merge and write concurrently, improves memory usage and runtime massively.
