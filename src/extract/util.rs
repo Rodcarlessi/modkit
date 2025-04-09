@@ -4,7 +4,9 @@ use crate::interval_chunks::{
 };
 use crate::mod_bam::{CollapseMethod, EdgeFilter, TrackingModRecordIter};
 use crate::monoid::Moniod;
-use crate::motifs::motif_bed::{find_motif_hits, RegexMotif};
+use crate::motifs::motif_bed::{
+    find_motif_hits, MotifPositionLookup, RegexMotif,
+};
 use crate::position_filter::{GenomeIntervals, Iv, StrandedPositionFilter};
 use crate::read_ids_to_base_mod_probs::{
     ModProfile, ReadBaseModProfile, ReadsBaseModProfile,
@@ -82,6 +84,7 @@ impl ReferencePositionFilter {
                 let chrom_id = read_base_mod_profile.chrom_id;
                 let flag = read_base_mod_profile.flag;
                 let alignment_start = read_base_mod_profile.alignment_start;
+                let alignment_end = read_base_mod_profile.alignment_end;
                 let profile = read_base_mod_profile
                     .profile
                     .into_par_iter()
@@ -108,6 +111,7 @@ impl ReferencePositionFilter {
                     chrom_id,
                     flag,
                     alignment_start,
+                    alignment_end,
                     profile,
                 )
             })
@@ -131,8 +135,11 @@ pub(super) fn load_regions(
     contigs: &HashMap<String, Vec<u8>>,
     master_progress_bar: &MultiProgress,
     thread_pool: &ThreadPool,
-) -> anyhow::Result<(Option<ReferenceIntervalsFeeder>, ReferencePositionFilter)>
-{
+) -> anyhow::Result<(
+    Option<ReferenceIntervalsFeeder>,
+    ReferencePositionFilter,
+    Option<MotifPositionLookup>,
+)> {
     let (include_unmapped_reads, include_unmapped_positions) = if input_args
         .include_bed
         .is_some()
@@ -186,17 +193,19 @@ pub(super) fn load_regions(
         })
         .transpose()?;
 
-    // intersect the motif positions with the include positions from the BED
-    // file
-    let include_positions = if let Some(motifs) = motifs {
+    // extract the motif positions, if given
+    let tid_motif_to_positions = motifs.as_ref().map(|motifs| {
         let pb =
             master_progress_bar.add(get_subroutine_progress_bar(contigs.len()));
+        master_progress_bar.suspend(|| {
+            info!("searching for {} motifs", motifs.len());
+        });
         pb.set_message("contigs searched");
         let contigs_sorted_by_size = contigs
             .iter()
             .sorted_by(|(_, s), (_, p)| s.len().cmp(&p.len()))
             .collect::<Vec<(&String, &Vec<u8>)>>();
-        let tid_to_positions = thread_pool.install(|| {
+        thread_pool.install(|| {
             contigs_sorted_by_size
                 .into_par_iter()
                 .progress_with(pb)
@@ -213,7 +222,8 @@ pub(super) fn load_regions(
                     };
                     motifs
                         .par_iter()
-                        .map(|motif| {
+                        .enumerate()
+                        .map(|(motif_idx, motif)| {
                             let positions = find_motif_hits(&seq, motif);
                             let positions = if let Some(filter) =
                                 include_positions.as_ref()
@@ -231,51 +241,74 @@ pub(super) fn load_regions(
                             } else {
                                 positions
                             };
-                            (tid, positions)
+                            ((tid, motif_idx), positions)
                         })
-                        .collect::<HashMap<u32, Vec<(usize, Strand)>>>()
+                        .collect::<FxHashMap<(u32, usize), Vec<(usize, Strand)>>>(
+                        )
                 })
-                .reduce(|| HashMap::zero(), |a, b| a.op(b))
-        });
-        let (pos_lappers, neg_lappers) = tid_to_positions.into_iter().fold(
-            (FxHashMap::default(), FxHashMap::default()),
-            |(mut pos, mut neg), (tid, positions)| {
-                let to_lapper =
-                    |intervals: Vec<(Iv, Strand)>| -> GenomeIntervals<()> {
-                        let intervals =
-                            intervals.into_iter().map(|(iv, _)| iv).collect();
-                        GenomeIntervals::new(intervals)
-                    };
-
-                let (pos_positions, neg_positions): (
-                    Vec<(Iv, Strand)>,
-                    Vec<(Iv, Strand)>,
-                ) = positions
-                    .into_iter()
-                    .map(|(position, strand)| {
-                        let iv = Iv {
-                            start: position as u64,
-                            stop: (position + 1) as u64,
-                            val: (),
-                        };
-                        (iv, strand)
-                    })
-                    .partition(|(_iv, strand)| *strand == Strand::Positive);
-                let pos_lapper = to_lapper(pos_positions);
-                let neg_lapper = to_lapper(neg_positions);
-                pos.insert(tid, pos_lapper);
-                neg.insert(tid, neg_lapper);
-                (pos, neg)
-            },
-        );
-
-        Some(StrandedPositionFilter {
-            pos_positions: pos_lappers,
-            neg_positions: neg_lappers,
+                .reduce(|| FxHashMap::zero(), |a, b| a.op(b))
         })
-    } else {
-        include_positions
+    });
+
+    // intersect the motif positions with the include positions from the BED
+    // file
+    let to_lapper = |intervals: Vec<(Iv, Strand)>| -> GenomeIntervals<()> {
+        let intervals = intervals.into_iter().map(|(iv, _)| iv).collect();
+        GenomeIntervals::new(intervals)
     };
+
+    let include_positions =
+        match (tid_motif_to_positions.as_ref(), input_args.annotate_motifs) {
+            (Some(tid_motif_to_pos), false) => {
+                let tid_to_positions = tid_motif_to_pos.iter().fold(
+                    FxHashMap::default(),
+                    |mut agg, ((tid, _motif_idx), positions)| {
+                        let ps = agg.entry(*tid).or_insert_with(Vec::new);
+                        ps.extend(positions.iter().map(|(pos, strand)| {
+                            let iv = Iv {
+                                start: *pos as u64,
+                                stop: (*pos).saturating_add(1) as u64,
+                                val: (),
+                            };
+                            (iv, *strand)
+                        }));
+                        agg
+                    },
+                );
+
+                let (pos_lappers, neg_lappers) =
+                    tid_to_positions.into_iter().fold(
+                        (FxHashMap::default(), FxHashMap::default()),
+                        |(mut pos, mut neg), (tid, intervals)| {
+                            let (pos_intervals, neg_intervals): (
+                                Vec<(Iv, Strand)>,
+                                Vec<(Iv, Strand)>,
+                            ) = intervals.into_iter().partition(
+                                |(_iv, strand)| *strand == Strand::Positive,
+                            );
+                            let mut pos_lapper = to_lapper(pos_intervals);
+                            let mut neg_lapper = to_lapper(neg_intervals);
+                            pos_lapper.merge_overlaps();
+                            neg_lapper.merge_overlaps();
+                            pos.insert(tid, pos_lapper);
+                            neg.insert(tid, neg_lapper);
+                            (pos, neg)
+                        },
+                    );
+
+                Some(StrandedPositionFilter {
+                    pos_positions: pos_lappers,
+                    neg_positions: neg_lappers,
+                })
+            }
+            (Some(_), true) => {
+                master_progress_bar.suspend(|| {
+                    info!("annotating motifs, but not restricting output");
+                });
+                include_positions
+            }
+            _ => include_positions,
+        };
 
     let reference_and_intervals = if !using_stdin && !input_args.ignore_index {
         match bam::IndexedReader::from_path(&input_args.in_bam) {
@@ -316,6 +349,13 @@ pub(super) fn load_regions(
         None
     };
 
+    let motif_lookup = match (tid_motif_to_positions, motifs) {
+        (Some(tid_motif_positions), Some(motifs)) => {
+            Some(MotifPositionLookup::new(tid_motif_positions, motifs))
+        }
+        _ => None,
+    };
+
     let reference_position_filter = ReferencePositionFilter::new(
         include_positions,
         exclude_positions,
@@ -323,7 +363,7 @@ pub(super) fn load_regions(
         include_unmapped_positions,
     );
 
-    Ok((reference_and_intervals, reference_position_filter))
+    Ok((reference_and_intervals, reference_position_filter, motif_lookup))
 }
 
 pub(super) fn run_extract_reads(

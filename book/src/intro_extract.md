@@ -14,27 +14,30 @@ or `stdout` and filter the columns before writing to disk.
 
 ## Description of output table for `extract full`
 
-| column | name                  | description                                                                     | type |
-|--------|-----------------------|---------------------------------------------------------------------------------|------|
-| 1      | read_id               | name of the read                                                                | str  |
-| 2      | forward_read_position | 0-based position on the forward-oriented read sequence                          | int  |
-| 3      | ref_position          | aligned 0-based reference sequence position, -1 means unmapped                  | int  |
-| 4      | chrom                 | name of aligned contig, or '.' if the read is Gunmapped                         | str  |
-| 5      | mod_strand            | strand of the molecule the base modification is on                              | str  |
-| 6      | ref_strand            | strand of the reference the read is aligned to, or '.' if unmapped              | str  |
-| 7      | ref_mod_strand        | strand of the reference with the base modification, or '.' if unmapped          | str  |
-| 8      | fw_soft_clipped_start | number of bases soft clipped from the start of the forward-oriented read        | int  |
-| 9      | fw_soft_clipped_end   | number of bases soft clipped from the end of the forward-oriented read          | int  |
-| 10     | read_length           | total length of the read                                                        | int  |
-| 11     | mod_qual              | probability of the base modification in the next column                         | int  |
-| 12     | mod_code              | base modification code from the MM tag                                          | str  |
-| 13     | base_qual             | basecall quality score (phred)                                                  | int  |
-| 14     | ref_kmer              | reference 5-mer sequence context (center base is aligned base), '.' if unmapped | str  |
-| 15     | query_kmer            | read 5-mer sequence context (center base is aligned base)                       | str  |
-| 16     | canonical_base        | canonical base from the query sequence, from the MM tag                         | str  |
-| 17     | modified_primary_base | primary sequence base with the modification                                     | str  |
-| 18     | inferred              | whether the base modification call is implicit canonical                        | str  |
-| 19     | flag                  | FLAG from alignment record                                                      | str  |
+| column | name                  | description                                                                                                             | type |
+|--------|-----------------------|-------------------------------------------------------------------------------------------------------------------------|------|
+| 1      | read_id               | name of the read                                                                                                        | str  |
+| 2      | forward_read_position | 0-based position on the forward-oriented read sequence                                                                  | int  |
+| 3      | ref_position          | aligned 0-based reference sequence position, -1 means unmapped                                                          | int  |
+| 4      | chrom                 | name of aligned contig, or '.' if the read is Gunmapped                                                                 | str  |
+| 5      | mod_strand            | strand of the molecule the base modification is on                                                                      | str  |
+| 6      | ref_strand            | strand of the reference the read is aligned to, or '.' if unmapped                                                      | str  |
+| 7      | ref_mod_strand        | strand of the reference with the base modification, or '.' if unmapped                                                  | str  |
+| 8      | fw_soft_clipped_start | number of bases soft clipped from the start of the forward-oriented read                                                | int  |
+| 9      | fw_soft_clipped_end   | number of bases soft clipped from the end of the forward-oriented read                                                  | int  |
+| 10     | alignment_start       | leftmost (i.e. smallest) aligned reference position                                                                     | int  |
+| 11     | alignment_end         | rightmost (i.e. largest) aligned reference position                                                                     | int  |
+| 12     | read_length           | total length of the read                                                                                                | int  |
+| 13     | mod_qual              | probability of the base modification in the next column                                                                 | int  |
+| 14     | mod_code              | base modification code from the MM tag                                                                                  | str  |
+| 15     | base_qual             | basecall quality score (phred)                                                                                          | int  |
+| 16     | ref_kmer              | reference 5-mer sequence context (center base is aligned base), '.' if unmapped                                         | str  |
+| 17     | query_kmer            | read 5-mer sequence context (center base is aligned base)                                                               | str  |
+| 18     | canonical_base        | canonical base from the query sequence, from the MM tag                                                                 | str  |
+| 19     | modified_primary_base | primary sequence base with the modification                                                                             | str  |
+| 20     | inferred              | whether the base modification call is implicit canonical                                                                | str  |
+| 21     | flag                  | FLAG from alignment record                                                                                              | str  |
+| 22     | motifs                | comma-separated list of reference motifs matching at this position, **only present when `--motifs` or `--cpg` is used** | str  |
 
 
 # Tabulating base modification _calls_ for each read position with `extract calls`
@@ -43,29 +46,32 @@ The resultant table has, for each read, one row for each base modification call 
 If a base is called as modified then `call_code` will be the code in the `MM` tag. If the base is called as canonical the `call_code` will be `-` (`A`, `C`, `G`, and `T` are
 reserved for "any modification"). The full schema of the table is below:
 
-| column | name                  | description                                                                     | type |
-|--------|-----------------------|---------------------------------------------------------------------------------|------|
-| 1      | read_id               | name of the read                                                                | str  |
-| 2      | forward_read_position | 0-based position on the forward-oriented read sequence                          | int  |
-| 3      | ref_position          | aligned 0-based reference sequence position, -1 means unmapped                  | int  |
-| 4      | chrom                 | name of aligned contig, or '.' if unmapped                                      | str  |
-| 5      | mod_strand            | strand of the molecule the base modification is on                              | str  |
-| 6      | ref_strand            | strand of the reference the read is aligned to, or '.' if unmapped              | str  |
-| 7      | ref_mod_strand        | strand of the reference with the base modification, or '.' if unmapped          | str  |
-| 8      | fw_soft_clipped_start | number of bases soft clipped from the start of the forward-oriented read        | int  |
-| 9      | fw_soft_clipped_end   | number of bases soft clipped from the end of the forward-oriented read          | int  |
-| 10     | read_length           | total length of the read                                                        | int  |
-| 11     | call_prob             | probability of the base modification call in the next column                    | int  |
-| 12     | call_code             | base modification call, `-` indicates a canonical call                          | str  |
-| 13     | base_qual             | basecall quality score (phred)                                                  | int  |
-| 14     | ref_kmer              | reference 5-mer sequence context (center base is aligned base), '.' if unmapped | str  |
-| 15     | query_kmer            | read 5-mer sequence context (center base is aligned base)                       | str  |
-| 16     | canonical_base        | canonical base from the query sequence, from the MM tag                         | str  |
-| 17     | modified_primary_base | primary sequence base with the modification                                     | str  |
-| 18     | fail                  | true if the base modification call fell below the pass threshold                | str  |
-| 19     | inferred              | whether the base modification call is implicit canonical                        | str  |
-| 20     | within_alignment      | when alignment information is present, is this base aligned to the reference    | str  |
-| 21     | flag                  | FLAG from alignment record                                                      | str  |
+| column | name                  | description                                                                                                             | type |
+|--------|-----------------------|-------------------------------------------------------------------------------------------------------------------------|------|
+| 1      | read_id               | name of the read                                                                                                        | str  |
+| 2      | forward_read_position | 0-based position on the forward-oriented read sequence                                                                  | int  |
+| 3      | ref_position          | aligned 0-based reference sequence position, -1 means unmapped                                                          | int  |
+| 4      | chrom                 | name of aligned contig, or '.' if unmapped                                                                              | str  |
+| 5      | mod_strand            | strand of the molecule the base modification is on                                                                      | str  |
+| 6      | ref_strand            | strand of the reference the read is aligned to, or '.' if unmapped                                                      | str  |
+| 7      | ref_mod_strand        | strand of the reference with the base modification, or '.' if unmapped                                                  | str  |
+| 8      | fw_soft_clipped_start | number of bases soft clipped from the start of the forward-oriented read                                                | int  |
+| 9      | fw_soft_clipped_end   | number of bases soft clipped from the end of the forward-oriented read                                                  | int  |
+| 10     | alignment_start       | leftmost (i.e. smallest) aligned reference position                                                                     | int  |
+| 11     | alignment_end         | rightmost (i.e. largest) aligned reference position                                                                     | int  |
+| 12     | read_length           | total length of the read                                                                                                | int  |
+| 13     | call_prob             | probability of the base modification call in the next column                                                            | int  |
+| 14     | call_code             | base modification call, `-` indicates a canonical call                                                                  | str  |
+| 15     | base_qual             | basecall quality score (phred)                                                                                          | int  |
+| 16     | ref_kmer              | reference 5-mer sequence context (center base is aligned base), '.' if unmapped                                         | str  |
+| 17     | query_kmer            | read 5-mer sequence context (center base is aligned base)                                                               | str  |
+| 18     | canonical_base        | canonical base from the query sequence, from the MM tag                                                                 | str  |
+| 19     | modified_primary_base | primary sequence base with the modification                                                                             | str  |
+| 20     | fail                  | true if the base modification call fell below the pass threshold                                                        | str  |
+| 21     | inferred              | whether the base modification call is implicit canonical                                                                | str  |
+| 22     | within_alignment      | when alignment information is present, is this base aligned to the reference                                            | str  |
+| 23     | flag                  | FLAG from alignment record                                                                                              | str  |
+| 24     | motifs                | comma-separated list of reference motifs matching at this position, **only present when `--motifs` or `--cpg` is used** | str  |
 
 
 ## Note on implicit base modification calls.

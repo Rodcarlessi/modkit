@@ -2,6 +2,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
 
+use crate::monoid::Moniod;
+use crate::position_filter::StrandedPositionFilter;
+use crate::util::{
+    get_master_progress_bar, get_spinner, get_ticker, ReferenceRecord, Strand,
+    StrandRule,
+};
 use anyhow::{anyhow, bail, Context, Result as AnyhowResult};
 use bio::io::fasta::Reader as FastaReader;
 use derive_new::new;
@@ -11,12 +17,6 @@ use log::{debug, info};
 use rayon::prelude::*;
 use regex::{Match, Regex};
 use rustc_hash::FxHashMap;
-
-use crate::position_filter::StrandedPositionFilter;
-use crate::util::{
-    get_master_progress_bar, get_spinner, get_ticker, ReferenceRecord, Strand,
-    StrandRule,
-};
 
 fn iupac_to_regex(pattern: &str) -> anyhow::Result<String> {
     let mut regex = String::new();
@@ -663,6 +663,47 @@ impl MotifLocations {
 
     pub fn motif(&self) -> &RegexMotif {
         &self.motif
+    }
+}
+
+pub(crate) struct MotifPositionLookup {
+    inner: FxHashMap<(u32, usize, Strand), Vec<usize>>,
+    motifs: Vec<RegexMotif>,
+}
+
+impl MotifPositionLookup {
+    pub(crate) fn new(
+        tid_motif_positions: FxHashMap<(u32, usize), Vec<(usize, Strand)>>,
+        motifs: Vec<RegexMotif>,
+    ) -> Self {
+        let inner = tid_motif_positions
+            .into_par_iter()
+            .fold(
+                || FxHashMap::default(),
+                |mut agg, ((tid, motif_idx), positions)| {
+                    for (pos, strand) in positions {
+                        agg.entry((tid, pos, strand))
+                            .or_insert_with(Vec::new)
+                            .push(motif_idx);
+                    }
+                    agg
+                },
+            )
+            .reduce(|| FxHashMap::default(), |a, b| a.op(b));
+
+        Self { inner, motifs }
+    }
+
+    pub(crate) fn get_motif_hits(
+        &self,
+        tid: u32,
+        position: usize,
+        strand: Strand,
+    ) -> Option<String> {
+        let k = (tid, position, strand);
+        self.inner.get(&k).map(|ixs| {
+            ixs.iter().map(|i| self.motifs[*i].to_string()).join(";")
+        })
     }
 }
 

@@ -2,55 +2,77 @@ use std::collections::HashMap;
 use std::io::Write;
 
 use crate::mod_bam::BaseModCall;
+use crate::motifs::motif_bed::MotifPositionLookup;
 use crate::read_ids_to_base_mod_probs::{
-    PositionModCalls, ReadsBaseModProfile,
+    PositionModCalls, ReadBaseModProfile, ReadsBaseModProfile,
 };
 use crate::threshold_mod_caller::MultipleThresholdModCaller;
-use crate::util::{get_reference_mod_strand, Kmer, Strand};
+use crate::util::{
+    get_reference_mod_strand, Kmer, Strand, MISSING_SYMBOL, TAB,
+};
 use crate::writers::TsvWriter;
 
 impl PositionModCalls {
-    pub(super) fn header() -> String {
-        let tab = '\t';
-        format!(
-            "\
-            read_id{tab}\
-            forward_read_position{tab}\
-            ref_position{tab}\
-            chrom{tab}\
-            mod_strand{tab}\
-            ref_strand{tab}\
-            ref_mod_strand{tab}\
-            fw_soft_clipped_start{tab}\
-            fw_soft_clipped_end{tab}\
-            read_length{tab}\
-            call_prob{tab}\
-            call_code{tab}\
-            base_qual{tab}\
-            ref_kmer{tab}\
-            query_kmer{tab}\
-            canonical_base{tab}\
-            modified_primary_base{tab}\
-            fail{tab}\
-            inferred{tab}\
-            within_alignment{tab}\
-            flag"
-        )
+    pub(super) fn header(with_motifs: bool) -> String {
+        let mut fields = vec![
+            "read_id",
+            "forward_read_position",
+            "ref_position",
+            "chrom",
+            "mod_strand",
+            "ref_strand",
+            "ref_mod_strand",
+            "fw_soft_clipped_start",
+            "fw_soft_clipped_end",
+            "alignment_start",
+            "alignment_end",
+            "read_length",
+            "call_prob",
+            "call_code",
+            "base_qual",
+            "ref_kmer",
+            "query_kmer",
+            "canonical_base",
+            "modified_primary_base",
+            "fail",
+            "inferred",
+            "within_alignment",
+            "flag",
+        ];
+        if with_motifs {
+            fields.push("motifs")
+        }
+        fields.join("\t")
     }
 
     pub(crate) fn to_row(
         &self,
-        read_id: &str,
+        profile: &ReadBaseModProfile,
         chrom_name: Option<&String>,
         caller: &MultipleThresholdModCaller,
         reference_seqs: &HashMap<String, Vec<u8>>,
-        flag: u16,
         pass_only: bool,
         skip_inferred: bool,
+        motif_position_lookup: Option<&MotifPositionLookup>,
+        with_motifs: bool,
     ) -> Option<String> {
         let filtered = caller.call(&self.canonical_base, &self.base_mod_probs)
             == BaseModCall::Filtered;
         let inferred = self.base_mod_probs.inferred_unmodified;
+        let motif_hits = motif_position_lookup.and_then(|lu| {
+            match (self.ref_position, profile.chrom_id, self.alignment_strand) {
+                (Some(i), Some(tid), Some(strand)) if i > 0i64 => {
+                    let pos = i as usize;
+                    let motif_hits = lu.get_motif_hits(
+                        tid,
+                        pos,
+                        get_reference_mod_strand(self.mod_strand, strand),
+                    );
+                    motif_hits
+                }
+                _ => None,
+            }
+        });
         if filtered && pass_only {
             return None;
         }
@@ -58,7 +80,6 @@ impl PositionModCalls {
             return None;
         }
 
-        let tab = '\t';
         let missing = ".".to_string();
         let chrom_name_label = chrom_name.unwrap_or(&missing).to_owned();
         let forward_read_position = self.query_position;
@@ -104,35 +125,56 @@ impl PositionModCalls {
         };
         let within_alignment = chrom_name.is_some() && self.within_alignment();
 
-        Some(format!(
+        let mut s = format!(
             "\
-            {read_id}{tab}\
-            {forward_read_position}{tab}\
-            {ref_position}{tab}\
-            {chrom_name_label}{tab}\
-            {mod_strand}{tab}\
-            {ref_strand}{tab}\
-            {ref_mod_strand}{tab}\
-            {fw_soft_clipped_start}{tab}\
-            {fw_soft_clipped_end}{tab}\
-            {read_length}{tab}\
-            {mod_call_prob}{tab}\
-            {mod_call_code}{tab}\
-            {base_qual}{tab}\
-            {ref_kmer_rep}{tab}\
-            {query_kmer}{tab}\
-            {canonical_base}{tab}\
-            {modified_primary_base}{tab}\
-            {filtered}{tab}\
-            {inferred}{tab}\
-            {within_alignment}{tab}\
-            {flag}\n"
-        ))
+            {}{TAB}\
+            {forward_read_position}{TAB}\
+            {ref_position}{TAB}\
+            {chrom_name_label}{TAB}\
+            {mod_strand}{TAB}\
+            {ref_strand}{TAB}\
+            {ref_mod_strand}{TAB}\
+            {fw_soft_clipped_start}{TAB}\
+            {fw_soft_clipped_end}{TAB}\
+            {}{TAB}\
+            {}{TAB}\
+            {read_length}{TAB}\
+            {mod_call_prob}{TAB}\
+            {mod_call_code}{TAB}\
+            {base_qual}{TAB}\
+            {ref_kmer_rep}{TAB}\
+            {query_kmer}{TAB}\
+            {canonical_base}{TAB}\
+            {modified_primary_base}{TAB}\
+            {filtered}{TAB}\
+            {inferred}{TAB}\
+            {within_alignment}{TAB}\
+            {}",
+            &profile.record_name,
+            profile.alignment_start.map(|x| x as i64).unwrap_or(-1i64),
+            profile.alignment_end.map(|x| x as i64).unwrap_or(-1i64),
+            &profile.flag,
+        );
+
+        if with_motifs {
+            s.push(TAB);
+            if let Some(x) = motif_hits.as_ref() {
+                s.push_str(x.as_str());
+            } else {
+                s.push_str(MISSING_SYMBOL);
+            }
+        }
+        s.push_str("\n");
+        Some(s)
     }
 }
 
-pub trait OutwriterWithMemory<T> {
-    fn write(&mut self, item: T, kmer_size: usize) -> anyhow::Result<u64>;
+pub(crate) trait OutwriterWithMemory<T> {
+    fn write(
+        &mut self,
+        item: T,
+        motif_position_lookup: Option<&MotifPositionLookup>,
+    ) -> anyhow::Result<u64>;
     fn num_reads(&self) -> usize;
 }
 
@@ -143,6 +185,7 @@ pub struct TsvWriterWithContigNames<W: Write, C> {
     number_of_written_reads: usize,
     caller: C,
     pass_only: bool,
+    with_motifs: bool,
 }
 
 impl<W: Write> TsvWriterWithContigNames<W, ()> {
@@ -150,6 +193,7 @@ impl<W: Write> TsvWriterWithContigNames<W, ()> {
         output_writer: TsvWriter<W>,
         tid_to_name: HashMap<u32, String>,
         name_to_seq: HashMap<String, Vec<u8>>,
+        with_motifs: bool,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             tsv_writer: output_writer,
@@ -158,6 +202,7 @@ impl<W: Write> TsvWriterWithContigNames<W, ()> {
             number_of_written_reads: 0,
             caller: (),
             pass_only: false,
+            with_motifs,
         })
     }
 }
@@ -168,21 +213,26 @@ impl<W: Write> OutwriterWithMemory<ReadsBaseModProfile>
     fn write(
         &mut self,
         item: ReadsBaseModProfile,
-        kmer_size: usize,
+        motif_position_lookup: Option<&MotifPositionLookup>,
     ) -> anyhow::Result<u64> {
-        let missing_chrom = ".".to_string();
         let mut rows_written = 0u64;
         for profile in item.profiles.iter() {
             let chrom_name = profile
                 .chrom_id
-                .and_then(|chrom_id| self.tid_to_name.get(&chrom_id));
+                .and_then(|chrom_id| self.tid_to_name.get(&chrom_id))
+                .map(|x| x.as_str())
+                .unwrap_or(MISSING_SYMBOL);
             for mod_profile in profile.iter_profiles() {
                 let row = mod_profile.to_row(
                     &profile.record_name,
-                    chrom_name.unwrap_or(&missing_chrom),
+                    chrom_name,
+                    profile.chrom_id,
+                    profile.alignment_start,
+                    profile.alignment_end,
                     &self.name_to_seq,
-                    kmer_size,
                     profile.flag,
+                    motif_position_lookup,
+                    self.with_motifs,
                 );
                 self.tsv_writer.write(row.as_bytes())?;
                 rows_written += 1;
@@ -204,6 +254,7 @@ impl<W: Write> TsvWriterWithContigNames<W, MultipleThresholdModCaller> {
         name_to_seq: HashMap<String, Vec<u8>>,
         caller: MultipleThresholdModCaller,
         pass_only: bool,
+        with_motifs: bool,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             tsv_writer: output_writer,
@@ -212,6 +263,7 @@ impl<W: Write> TsvWriterWithContigNames<W, MultipleThresholdModCaller> {
             number_of_written_reads: 0,
             caller,
             pass_only,
+            with_motifs,
         })
     }
 }
@@ -222,7 +274,7 @@ impl<W: Write> OutwriterWithMemory<ReadsBaseModProfile>
     fn write(
         &mut self,
         item: ReadsBaseModProfile,
-        _kmer_size: usize,
+        motif_position_lookup: Option<&MotifPositionLookup>,
     ) -> anyhow::Result<u64> {
         let mut rows_written = 0u64;
         for profile in item.profiles.iter() {
@@ -232,13 +284,14 @@ impl<W: Write> OutwriterWithMemory<ReadsBaseModProfile>
             let position_calls = PositionModCalls::from_profile(&profile);
             for call in position_calls {
                 call.to_row(
-                    &profile.record_name,
+                    profile,
                     chrom_name,
                     &self.caller,
                     &self.name_to_seq,
-                    profile.flag,
                     self.pass_only,
                     false,
+                    motif_position_lookup,
+                    self.with_motifs,
                 )
                 .map(|s| self.tsv_writer.write(s.as_bytes()))
                 .transpose()?;

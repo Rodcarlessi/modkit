@@ -103,6 +103,14 @@ pub(super) struct InputArgs {
     #[clap(help_heading = "Modified Base Options")]
     #[arg(long, action = clap::ArgAction::Append, num_args = 2, requires = "reference")]
     pub motif: Option<Vec<String>>,
+    /// When used with `--motif` or `--cpg` emit all modified base alignment
+    /// information even if it does not align to a reference motif, but
+    /// annotate which aligned positions match which motifs in the "motifs"
+    /// column. "." will be used when an aligned position does not match a
+    /// motif.
+    #[clap(help_heading = "Modified Base Options")]
+    #[arg(long, requires = "motif", default_value_t = false)]
+    pub annotate_motifs: bool,
     /// Only output counts at CpG motifs. Requires a reference sequence to be
     /// provided.
     #[clap(help_heading = "Modified Base Options")]

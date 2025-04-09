@@ -38,6 +38,7 @@ use crate::parsing_utils::{
 };
 
 pub(crate) const TAB: char = '\t';
+pub(crate) const MISSING_SYMBOL: &'static str = ".";
 
 pub(crate) fn create_out_directory<T: AsRef<std::ffi::OsStr>>(
     raw_path: T,

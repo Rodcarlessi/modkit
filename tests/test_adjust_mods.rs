@@ -1,6 +1,6 @@
 use crate::common::{parse_mod_profile, run_simple_summary};
 use anyhow::Context;
-use common::run_modkit;
+use common::{check_legal_csv, run_modkit};
 use mod_kit::mod_bam::RawModTags;
 use mod_kit::mod_base_code::{BaseState, DnaBase};
 use rust_htslib::{bam, bam::Read};
@@ -347,7 +347,11 @@ fn test_adjust_edge_filter() {
         .context("test_adjust_edge_filter failed to run extract")
         .unwrap();
 
+        check_legal_csv::<{ '\t' as u8 }>(&methyl_profile_fp)
+            .context(format!("{methyl_profile_fp:?} is not a legal csv"))
+            .unwrap();
         let low_bound = edge_filter;
+        println!("> {methyl_profile_fp:?}");
         let mod_profile = parse_mod_profile(&methyl_profile_fp).unwrap();
         for (_read_name, mod_datas) in mod_profile {
             for mod_data in mod_datas.iter() {
