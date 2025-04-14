@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{stdout, BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
 
 use anyhow::{anyhow, bail};
@@ -36,10 +36,11 @@ pub struct EntryStats {
     /// Only use records with at least this much valid coverage.
     #[arg(short = 'm', long, alias = "min-cov", default_value_t = 1)]
     min_coverage: u64,
-    /// Specify the output file to write the results table.
+    /// Specify the output file to write the results table, or "-"/"stdout" for
+    /// stdout
     #[clap(help_heading = "Output Options")]
     #[arg(long, short = 'o', alias = "out")]
-    out_table: PathBuf,
+    out_table: String,
     /// Force overwrite the output file.
     #[clap(help_heading = "Output Options")]
     #[arg(long, default_value_t = false)]
@@ -67,10 +68,16 @@ impl EntryStats {
         let _ = init_logging(self.log_filepath.as_ref());
         let index: HtsTabixHandler<BedMethylLine> =
             HtsTabixHandler::from_path(&self.in_bedmethyl)?;
-        let fh = if self.force {
-            File::create(&self.out_table)?
-        } else {
-            File::create_new(&self.out_table)?
+        let handle: Box<dyn Write> = match self.out_table.as_str() {
+            "-" | "stdout" => Box::new(BufWriter::new(stdout())),
+            p @ _ => {
+                let fp = std::path::Path::new(p);
+                if self.force {
+                    Box::new(BufWriter::new(File::create(fp)?))
+                } else {
+                    Box::new(BufWriter::new(File::create_new(fp)?))
+                }
+            }
         };
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(self.threads)
@@ -199,7 +206,7 @@ impl EntryStats {
         });
 
         let csv_writer =
-            csv::WriterBuilder::new().delimiter('\t' as u8).from_writer(fh);
+            csv::WriterBuilder::new().delimiter('\t' as u8).from_writer(handle);
         table.to_csv_writer(csv_writer)?;
 
         Ok(())
