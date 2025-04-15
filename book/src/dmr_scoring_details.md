@@ -158,3 +158,13 @@ The full description of the emission probabilities for the two states is:
 \\[
     p_{\text{Different}} = 1 - p_{\text{same}}
 \\]
+
+## Cohen's h statistic for regions, single-sites, and segments
+As the number of positions being compared becomes large, small effect sizes will become statistically significant with as measured by most tests.
+The MAP-based p-value calculation has a maximum coverage of 100 reads since it becomes unstable when the number of trials per condition grows beyond this number (essentially the p-value becomes zero).
+A similar problem is encountered when comparing regions of CpG or transcripts of m6As either provided as regions to compare or as discovered by the segmentation algorithm. 
+To provide another metric that is more robust to high counts, Modkit DMR will output [Cohen's h statistic](https://en.wikipedia.org/wiki/Cohen%27s_h).
+**Importantly** this is a measure of changes in the proportion of modification of any type between the two conditions, similar to the MAP-based p-value, not a change in modification proportions (although it could be extended to measure this).
+In addition to the statistic, the high and low bound of the 95% confidence interval are reported.
+Generally speaking, filtering or sorting on the lower bound is a good test for finding important changes.
+

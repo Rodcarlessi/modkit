@@ -84,13 +84,7 @@ modkit dmr pair \
   --log-filepath dmr.log
 ```
 
-The ouput of this command will be similar to
-```csv
-chr20  9838623   9839213   CpG:  47   257.34514203447543    C:57   1777  C:601  2091   C:3.21  C:28.74  0.032076534   0.2874223
-chr20  10034962  10035266  CpG:  35   1.294227443419004     C:7    1513  C:14   1349   C:0.46  C:1.04   0.00462657    0.010378058
-```
-
-The full schema is described [below](#differential-methylation-output-format).
+The full schema is described [below](#differential-methylation-output-format) with an example output.
 
 ## 2. Perform differential methylation detection on all pairs of samples over regions from the genome.
 The `modkit dmr multi` command runs all pairwise comparisons for more than two samples for all regions provided in the regions BED file.
@@ -117,9 +111,7 @@ modkit dmr multi \
 
 For example the samples could be haplotype-partitioned bedMethyl tables or biological replicates.
 Unlike for `modkit dmr pair` a sample name (e.g. `norm1` and `tumor1` above) must be provided for each input
-sample. You can also use `--index <filepath> <sample_name>` to specify where the tabix index file is for each
 sample.
-
 
 ## 3. Detecting differential modification at single base positions
 The `modkit dmr pair` command has the ability to score individual bases (e.g. differentially methylated CpGs).
@@ -171,49 +163,58 @@ If your bedMethyl has records with custom modification codes or codes that aren'
 
 
 ## Differential methylation output format
-The output from `modkit dmr pair` (and for each pairwise comparison with `modkit dmr multi`) is (roughly)
-a BED file with the following schema:
+The output from `modkit dmr pair` (and for each pairwise comparison with `modkit dmr multi`) is (roughly) a BED file with the following schema:
 
-| column | name                                 | description                                                                               | type  |
-|--------|--------------------------------------|-------------------------------------------------------------------------------------------|-------|
-| 1      | chrom                                | name of reference sequence from bedMethyl input samples                                   | str   |
-| 2      | start position                       | 0-based start position, from `--regions` argument                                         | int   |
-| 3      | end position                         | 0-based exclusive end position, from `--regions` argument                                 | int   |
-| 4      | name                                 | `name` column from `--regions` BED, or `chr:start-stop` if absent, "." for single sites   | str   |
-| 5      | score                                | difference score, more positive values have increased difference                          | float |
-| 6      | strand                               | strand for the region or single-base position                                             | str   |
-| 7      | sample<sub>a</sub> counts            | counts of each base modification in the region, comma-separated, for sample A             | str   |
-| 8      | sample<sub>a</sub> total             | total number of base modification calls in the region, including unmodified, for sample A | str   |
-| 9      | sample<sub>b</sub> counts            | counts of each base modification in the region, comma-separated, for sample B             | str   |
-| 10     | sample<sub>b</sub> total             | total number of base modification calls in the region, including unmodified, for sample B | str   |
-| 11     | sample<sub>a</sub> percents          | percent of calls for each base modification in the region, comma-separated, for sample A  | str   |
-| 12     | sample<sub>b</sub> percents          | percent of calls for each base modification in the region, comma-separated, for sample B  | str   |
-| 13     | sample<sub>a</sub> fraction modified | fraction modification (of any kind) in sample A                                           | float |
-| 14     | sample<sub>b</sub> fraction modified | fraction modification (of any kind) in sample B                                           | float |
+| column | name                                 | description                                                                                                | type  |
+|--------|--------------------------------------|------------------------------------------------------------------------------------------------------------|-------|
+| 1      | chrom                                | name of reference sequence from bedMethyl input samples                                                    | str   |
+| 2      | start position                       | 0-based start position, from `--regions` argument                                                          | int   |
+| 3      | end position                         | 0-based exclusive end position, from `--regions` argument                                                  | int   |
+| 4      | name                                 | `name` column from `--regions` BED, or `chr:start-stop` if absent, "." for single sites                    | str   |
+| 5      | score                                | difference score, more positive values have increased difference                                           | float |
+| 6      | strand                               | strand for the region or single-base position                                                              | str   |
+| 7      | sample<sub>a</sub> counts            | counts of each base modification in the region, comma-separated, for sample A                              | str   |
+| 8      | sample<sub>a</sub> total             | total number of base modification calls in the region, including unmodified, for sample A                  | str   |
+| 9      | sample<sub>b</sub> counts            | counts of each base modification in the region, comma-separated, for sample B                              | str   |
+| 10     | sample<sub>b</sub> total             | total number of base modification calls in the region, including unmodified, for sample B                  | str   |
+| 11     | sample<sub>a</sub> percents          | percent of calls for each base modification in the region, comma-separated, for sample A                   | str   |
+| 12     | sample<sub>b</sub> percents          | percent of calls for each base modification in the region, comma-separated, for sample B                   | str   |
+| 13     | sample<sub>a</sub> fraction modified | fraction modification (of any kind) in sample A                                                            | float |
+| 14     | sample<sub>b</sub> fraction modified | fraction modification (of any kind) in sample B                                                            | float |
+| (15)   | cohen_h                              | Cohen's h [statistic](https://en.wikipedia.org/wiki/Cohen%27s_h) (useful with regions and high-depth runs) | float |
+| (16)   | cohen_h_low                          | 95% confidence interval lower bound                                                                        | float |
+| (17)   | cohen_h_high                         | 95% confidence interval upper bound                                                                        | float |
 
 an example of the output is given below:
 
-```text
-chr20  9838623   9839213   CpG:  47   257.34514203447543    C:57   1777  C:601  2091   C:3.21  C:28.74  0.032076534   0.2874223
-chr20  10034962  10035266  CpG:  35   1.294227443419004     C:7    1513  C:14   1349   C:0.46  C:1.04   0.00462657    0.010378058
-chr20  10172120  10172545  CpG:  35   5.013026381110649     C:43   1228  C:70   1088   C:3.50  C:6.43   0.035016287   0.06433824
-chr20  10217487  10218336  CpG:  59   173.7819873154349     C:136  2337  C:482  1838   C:5.82  C:26.22  0.058194265   0.26224157
-chr20  10433628  10434345  CpG:  71   -0.13968153023233754  C:31   2748  C:36   3733   C:1.13  C:0.96   0.0112809315  0.009643719
-chr20  10671925  10674963  CpG:  255  6.355823977093678     C:67   9459  C:153  12862  C:0.71  C:1.19   0.0070832013  0.011895506
+```tsv
+#chrom  start     end       name         score                 strand    a_counts    a_total   b_counts    b_total  a_mod_percentages  b_mod_percentages  a_pct_modified  b_pct_modified  effect_size   cohen_h               cohen_h_low           cohen_h_high
+chr20   9838623   9839213   CpG:  47     266.4940337502594     .         h:12,m:45   1777      h:40,m:569  2101     h:0.68,m:2.53      h:1.90,m:27.08     0.032076534     0.28986198      -0.25778544   -0.7769052105982954   0.7137374830784644    0.8400729381181264
+chr20   10034962  10035266  CpG:  35     5.451198465947527     .         h:7,m:0     1513      h:8,m:8     1352     h:0.46,m:0.00      h:0.59,m:0.59      0.00462657      0.01183432      -0.00720775   -0.08185985199348272  0.008509433779133421  0.155210270207832
+chr20   10172120  10172545  CpG:  35     7.8346692400409665    .         h:15,m:28   1229      h:10,m:60   1091     h:1.22,m:2.28      h:0.92,m:5.50      0.034987796     0.06416132      -0.029173527  -0.1358646714824175   0.05433723875835786   0.21739210420647712
+chr20   10217487  10218336  CpG:  59     185.80326974114905    .         h:29,m:108  2339      h:38,m:453  1852     h:1.24,m:4.62      h:2.05,m:24.46     0.05857204      0.26511878      -0.20654674   -0.5928872447820701   0.5319235444885967    0.6538509450755435
+chr20   10433628  10434345  CpG:  71     -0.06490108458092436  .         h:29,m:2    2750      h:32,m:5    3737     h:1.05,m:0.07      h:0.86,m:0.13      0.0112727275    0.00990099      0.0013717376  0.013409890828678855  -0.03583284167510216  0.06265262333245987
+chr20   10671925  10674963  CpG:  255    6.372129285562551     .         h:43,m:24   9461      h:101,m:54  12880    h:0.45,m:0.25      h:0.78,m:0.42      0.0070817037    0.012034162     -0.004952458  -0.05133810350234183  0.024799813076449084  0.07787639392823457
 ```
+
+**n.b.** Columns 15, 16, and 17 are present when the `--regions` option is passed, but these columns are on the right side of the table when performing single-site analysis (below).
+It is generally recommended to use the `--header` flag and standard CSV parsing to make sure the schema's between experiments are maintained.
 
 When performing single-site analysis, the following additional columns are added:
 
-| column | name                       | description                                                                           | type  |
-|--------|----------------------------|---------------------------------------------------------------------------------------|-------|
-| 15     | MAP-based p-value          | ratio of the posterior probability of observing the effect size over zero effect size | float |
-| 16     | effect size                | percent modified in sample A (col 12) minus percent modified in sample B (col 13)     | float |
-| 17     | balanced MAP-based p-value | MAP-based p-value when all replicates are balanced                                    | float |
-| 18     | balanced effect size       | effect size when all replicates are balanced                                          | float |
-| 19     | pct_a_samples              | percent of 'a' samples used in statistical test                                       | float |
-| 20     | pct_b_samples              | percent of 'b' samples used in statistical test                                       | float |
-| 21     | per-replicate p-values     | MAP-based p-values for matched replicate pairs                                        | float |
-| 22     | per-replicate effect sizes | effect sizes matched replicate pairs                                                  | float |
+| column | name                       | description                                                                                           | type  |
+|--------|----------------------------|-------------------------------------------------------------------------------------------------------|-------|
+| 15     | MAP-based p-value          | ratio of the posterior probability of observing the effect size over zero effect size                 | float |
+| 16     | effect size                | percent modified in sample A (col 12) minus percent modified in sample B (col 13)                     | float |
+| 17     | balanced MAP-based p-value | MAP-based p-value when all replicates are balanced                                                    | float |
+| 18     | balanced effect size       | effect size when all replicates are balanced                                                          | float |
+| 19     | pct_a_samples              | percent of 'a' samples used in statistical test                                                       | float |
+| 20     | pct_b_samples              | percent of 'b' samples used in statistical test                                                       | float |
+| 21     | per-replicate p-values     | MAP-based p-values for matched replicate pairs                                                        | float |
+| 22     | per-replicate effect sizes | effect sizes matched replicate pairs                                                                  | float |
+| 23     | cohen_h                    | Cohen's h [statistic](https://en.wikipedia.org/wiki/Cohen%27s_h) (useful with regions and high-depth runs) | float |
+| 24     | cohen_h_low                | 95% confidence interval lower bound                                                                   | float |
+| 25     | cohen_h_high               | 95% confidence interval upper bound                                                                   | float |
 
 
 Columns 16-19 are only produced when multiple samples are provided, columns 20 and 21 are only produced when there is an equal number of 'a' and 'b' samples.
@@ -273,19 +274,22 @@ To activate "fine-grained" mode, pass the `--fine-grained` flag.
 
 The output schema for the segments is:
 
-| column | name                                 | description                                                                               | type  |
-|--------|--------------------------------------|-------------------------------------------------------------------------------------------|-------|
-| 1      | chrom                                | name of reference sequence from bedMethyl input samples                                   | str   |
-| 2      | start position                       | 0-based start position, from `--regions` argument                                         | int   |
-| 3      | end position                         | 0-based exclusive end position, from `--regions` argument                                 | int   |
-| 4      | state-name                           | "different" when sites are differentially modified, "same" otherwise                      | str   |
-| 5      | score                                | difference score, more positive values have increased difference                          | float |
-| 6      | N-sites                              | number of sites (bedmethyl records) in the segment                                        | float |
-| 7      | sample<sub>a</sub> counts            | counts of each base modification in the region, comma-separated, for sample A             | str   |
-| 8      | sample<sub>b</sub> counts            | counts of each base modification in the region, comma-separated, for sample B             | str   |
-| 9      | sample<sub>a</sub> percents          | percent of calls for each base modification in the region, comma-separated, for sample A  | str   |
-| 10     | sample<sub>b</sub> percents          | percent of calls for each base modification in the region, comma-separated, for sample B  | str   |
-| 11     | sample<sub>a</sub> fraction modified | percent modification (of any kind) in sample A                                            | float |
-| 12     | sample<sub>b</sub> fraction modified | percent modification (of any kind) in sample B                                            | float |
-| 13     | effect size                          | percent modified in sample A (col 11) minus percent modified in sample B (col 12)         | float |
+| column | name                                 | description                                                                                           | type  |
+|--------|--------------------------------------|-------------------------------------------------------------------------------------------------------|-------|
+| 1      | chrom                                | name of reference sequence from bedMethyl input samples                                               | str   |
+| 2      | start position                       | 0-based start position, from `--regions` argument                                                     | int   |
+| 3      | end position                         | 0-based exclusive end position, from `--regions` argument                                             | int   |
+| 4      | state-name                           | "different" when sites are differentially modified, "same" otherwise                                  | str   |
+| 5      | score                                | difference score, more positive values have increased difference                                      | float |
+| 6      | N-sites                              | number of sites (bedmethyl records) in the segment                                                    | float |
+| 7      | sample<sub>a</sub> counts            | counts of each base modification in the region, comma-separated, for sample A                         | str   |
+| 8      | sample<sub>b</sub> counts            | counts of each base modification in the region, comma-separated, for sample B                         | str   |
+| 9      | sample<sub>a</sub> percents          | percent of calls for each base modification in the region, comma-separated, for sample A              | str   |
+| 10     | sample<sub>b</sub> percents          | percent of calls for each base modification in the region, comma-separated, for sample B              | str   |
+| 11     | sample<sub>a</sub> fraction modified | percent modification (of any kind) in sample A                                                        | float |
+| 12     | sample<sub>b</sub> fraction modified | percent modification (of any kind) in sample B                                                        | float |
+| 13     | effect size                          | percent modified in sample A (col 11) minus percent modified in sample B (col 12)                     | float |
+| 14     | cohen_h                              | Cohen's h [statistic](https://en.wikipedia.org/wiki/Cohen%27s_h) (useful with regions and high-depth runs) | float |
+| 15     | cohen_h_low                          | 95% confidence interval lower bound                                                                   | float |
+| 16     | cohen_h_high                         | 95% confidence interval upper bound                                                                   | float |
 

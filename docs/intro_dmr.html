@@ -250,11 +250,7 @@ modkit dmr pair \
   --threads ${threads} \
   --log-filepath dmr.log
 </code></pre>
-<p>The ouput of this command will be similar to</p>
-<pre><code class="language-csv">chr20  9838623   9839213   CpG:  47   257.34514203447543    C:57   1777  C:601  2091   C:3.21  C:28.74  0.032076534   0.2874223
-chr20  10034962  10035266  CpG:  35   1.294227443419004     C:7    1513  C:14   1349   C:0.46  C:1.04   0.00462657    0.010378058
-</code></pre>
-<p>The full schema is described <a href="#differential-methylation-output-format">below</a>.</p>
+<p>The full schema is described <a href="#differential-methylation-output-format">below</a> with an example output.</p>
 <h2 id="2-perform-differential-methylation-detection-on-all-pairs-of-samples-over-regions-from-the-genome"><a class="header" href="#2-perform-differential-methylation-detection-on-all-pairs-of-samples-over-regions-from-the-genome">2. Perform differential methylation detection on all pairs of samples over regions from the genome.</a></h2>
 <p>The <code>modkit dmr multi</code> command runs all pairwise comparisons for more than two samples for all regions provided in the regions BED file.
 The preparation of the data is identical to that for the <a href="#preparing-the-input-data">previous section</a> (for each sample, of course).</p>
@@ -275,7 +271,6 @@ The preparation of the data is identical to that for the <a href="#preparing-the
 </code></pre>
 <p>For example the samples could be haplotype-partitioned bedMethyl tables or biological replicates.
 Unlike for <code>modkit dmr pair</code> a sample name (e.g. <code>norm1</code> and <code>tumor1</code> above) must be provided for each input
-sample. You can also use <code>--index &lt;filepath&gt; &lt;sample_name&gt;</code> to specify where the tabix index file is for each
 sample.</p>
 <h2 id="3-detecting-differential-modification-at-single-base-positions"><a class="header" href="#3-detecting-differential-modification-at-single-base-positions">3. Detecting differential modification at single base positions</a></h2>
 <p>The <code>modkit dmr pair</code> command has the ability to score individual bases (e.g. differentially methylated CpGs).
@@ -318,8 +313,7 @@ For example, <code>h</code> is 5hmC and applies to cytosine bases, <code>a</code
 However, <code>modkit pileup</code> does not require that you use modification codes only in the specification.
 If your bedMethyl has records with custom modification codes or codes that aren't in the specification yet, use <code>--assign-code &lt;mod_code&gt;:&lt;primary_base&gt;</code> to indicate the code applies to a given primary sequence base.</p>
 <h2 id="differential-methylation-output-format"><a class="header" href="#differential-methylation-output-format">Differential methylation output format</a></h2>
-<p>The output from <code>modkit dmr pair</code> (and for each pairwise comparison with <code>modkit dmr multi</code>) is (roughly)
-a BED file with the following schema:</p>
+<p>The output from <code>modkit dmr pair</code> (and for each pairwise comparison with <code>modkit dmr multi</code>) is (roughly) a BED file with the following schema:</p>
 <div class="table-wrapper"><table><thead><tr><th>column</th><th>name</th><th>description</th><th>type</th></tr></thead><tbody>
 <tr><td>1</td><td>chrom</td><td>name of reference sequence from bedMethyl input samples</td><td>str</td></tr>
 <tr><td>2</td><td>start position</td><td>0-based start position, from <code>--regions</code> argument</td><td>int</td></tr>
@@ -335,16 +329,22 @@ a BED file with the following schema:</p>
 <tr><td>12</td><td>sample<sub>b</sub> percents</td><td>percent of calls for each base modification in the region, comma-separated, for sample B</td><td>str</td></tr>
 <tr><td>13</td><td>sample<sub>a</sub> fraction modified</td><td>fraction modification (of any kind) in sample A</td><td>float</td></tr>
 <tr><td>14</td><td>sample<sub>b</sub> fraction modified</td><td>fraction modification (of any kind) in sample B</td><td>float</td></tr>
+<tr><td>(15)</td><td>cohen_h</td><td>Cohen's h <a href="https://en.wikipedia.org/wiki/Cohen%27s_h">statistic</a> (useful with regions and high-depth runs)</td><td>float</td></tr>
+<tr><td>(16)</td><td>cohen_h_low</td><td>95% confidence interval lower bound</td><td>float</td></tr>
+<tr><td>(17)</td><td>cohen_h_high</td><td>95% confidence interval upper bound</td><td>float</td></tr>
 </tbody></table>
 </div>
 <p>an example of the output is given below:</p>
-<pre><code class="language-text">chr20  9838623   9839213   CpG:  47   257.34514203447543    C:57   1777  C:601  2091   C:3.21  C:28.74  0.032076534   0.2874223
-chr20  10034962  10035266  CpG:  35   1.294227443419004     C:7    1513  C:14   1349   C:0.46  C:1.04   0.00462657    0.010378058
-chr20  10172120  10172545  CpG:  35   5.013026381110649     C:43   1228  C:70   1088   C:3.50  C:6.43   0.035016287   0.06433824
-chr20  10217487  10218336  CpG:  59   173.7819873154349     C:136  2337  C:482  1838   C:5.82  C:26.22  0.058194265   0.26224157
-chr20  10433628  10434345  CpG:  71   -0.13968153023233754  C:31   2748  C:36   3733   C:1.13  C:0.96   0.0112809315  0.009643719
-chr20  10671925  10674963  CpG:  255  6.355823977093678     C:67   9459  C:153  12862  C:0.71  C:1.19   0.0070832013  0.011895506
+<pre><code class="language-tsv">#chrom  start     end       name         score                 strand    a_counts    a_total   b_counts    b_total  a_mod_percentages  b_mod_percentages  a_pct_modified  b_pct_modified  effect_size   cohen_h               cohen_h_low           cohen_h_high
+chr20   9838623   9839213   CpG:  47     266.4940337502594     .         h:12,m:45   1777      h:40,m:569  2101     h:0.68,m:2.53      h:1.90,m:27.08     0.032076534     0.28986198      -0.25778544   -0.7769052105982954   0.7137374830784644    0.8400729381181264
+chr20   10034962  10035266  CpG:  35     5.451198465947527     .         h:7,m:0     1513      h:8,m:8     1352     h:0.46,m:0.00      h:0.59,m:0.59      0.00462657      0.01183432      -0.00720775   -0.08185985199348272  0.008509433779133421  0.155210270207832
+chr20   10172120  10172545  CpG:  35     7.8346692400409665    .         h:15,m:28   1229      h:10,m:60   1091     h:1.22,m:2.28      h:0.92,m:5.50      0.034987796     0.06416132      -0.029173527  -0.1358646714824175   0.05433723875835786   0.21739210420647712
+chr20   10217487  10218336  CpG:  59     185.80326974114905    .         h:29,m:108  2339      h:38,m:453  1852     h:1.24,m:4.62      h:2.05,m:24.46     0.05857204      0.26511878      -0.20654674   -0.5928872447820701   0.5319235444885967    0.6538509450755435
+chr20   10433628  10434345  CpG:  71     -0.06490108458092436  .         h:29,m:2    2750      h:32,m:5    3737     h:1.05,m:0.07      h:0.86,m:0.13      0.0112727275    0.00990099      0.0013717376  0.013409890828678855  -0.03583284167510216  0.06265262333245987
+chr20   10671925  10674963  CpG:  255    6.372129285562551     .         h:43,m:24   9461      h:101,m:54  12880    h:0.45,m:0.25      h:0.78,m:0.42      0.0070817037    0.012034162     -0.004952458  -0.05133810350234183  0.024799813076449084  0.07787639392823457
 </code></pre>
+<p><strong>n.b.</strong> Columns 15, 16, and 17 are present when the <code>--regions</code> option is passed, but these columns are on the right side of the table when performing single-site analysis (below).
+It is generally recommended to use the <code>--header</code> flag and standard CSV parsing to make sure the schema's between experiments are maintained.</p>
 <p>When performing single-site analysis, the following additional columns are added:</p>
 <div class="table-wrapper"><table><thead><tr><th>column</th><th>name</th><th>description</th><th>type</th></tr></thead><tbody>
 <tr><td>15</td><td>MAP-based p-value</td><td>ratio of the posterior probability of observing the effect size over zero effect size</td><td>float</td></tr>
@@ -355,6 +355,9 @@ chr20  10671925  10674963  CpG:  255  6.355823977093678     C:67   9459  C:153  
 <tr><td>20</td><td>pct_b_samples</td><td>percent of 'b' samples used in statistical test</td><td>float</td></tr>
 <tr><td>21</td><td>per-replicate p-values</td><td>MAP-based p-values for matched replicate pairs</td><td>float</td></tr>
 <tr><td>22</td><td>per-replicate effect sizes</td><td>effect sizes matched replicate pairs</td><td>float</td></tr>
+<tr><td>23</td><td>cohen_h</td><td>Cohen's h <a href="https://en.wikipedia.org/wiki/Cohen%27s_h">statistic</a> (useful with regions and high-depth runs)</td><td>float</td></tr>
+<tr><td>24</td><td>cohen_h_low</td><td>95% confidence interval lower bound</td><td>float</td></tr>
+<tr><td>25</td><td>cohen_h_high</td><td>95% confidence interval upper bound</td><td>float</td></tr>
 </tbody></table>
 </div>
 <p>Columns 16-19 are only produced when multiple samples are provided, columns 20 and 21 are only produced when there is an equal number of 'a' and 'b' samples.
@@ -413,6 +416,9 @@ To activate "fine-grained" mode, pass the <code>--fine-grained</code> flag.</p>
 <tr><td>11</td><td>sample<sub>a</sub> fraction modified</td><td>percent modification (of any kind) in sample A</td><td>float</td></tr>
 <tr><td>12</td><td>sample<sub>b</sub> fraction modified</td><td>percent modification (of any kind) in sample B</td><td>float</td></tr>
 <tr><td>13</td><td>effect size</td><td>percent modified in sample A (col 11) minus percent modified in sample B (col 12)</td><td>float</td></tr>
+<tr><td>14</td><td>cohen_h</td><td>Cohen's h <a href="https://en.wikipedia.org/wiki/Cohen%27s_h">statistic</a> (useful with regions and high-depth runs)</td><td>float</td></tr>
+<tr><td>15</td><td>cohen_h_low</td><td>95% confidence interval lower bound</td><td>float</td></tr>
+<tr><td>16</td><td>cohen_h_high</td><td>95% confidence interval upper bound</td><td>float</td></tr>
 </tbody></table>
 </div>
                     </main>
